@@ -14,7 +14,6 @@
 
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 
-import appConfig from '@/app-config';
 import { getBasename, joinPaths } from '@/lib/util';
 
 const bcName = 'auth/session';
@@ -27,6 +26,16 @@ export type Session = {
   message: string | null;
   timestamp: Date;
 };
+
+/**
+ * Get CSRF token
+ */
+let csrfToken = '';
+let pendingTokenRefresh: Promise<void> | null = null;
+
+export function getCsrfToken(): string {
+  return csrfToken;
+}
 
 type ContextType = {
   session: Session | undefined;
@@ -41,6 +50,10 @@ const Context = createContext({} as ContextType);
 export async function getSession(): Promise<Session> {
   const url = new URL(joinPaths(getBasename(), '/api/auth/session'), window.location.origin);
   const resp = await fetch(url, { cache: 'no-store' });
+
+  const tok = resp.headers.get('X-CSRF-Token');
+  if (tok) csrfToken = tok;
+
   const sess = await resp.json();
 
   // convert timestamp
@@ -50,6 +63,24 @@ export async function getSession(): Promise<Session> {
   bcOut.postMessage(sess);
 
   return sess;
+}
+
+export function resetCsrfToken(): void {
+  csrfToken = '';
+}
+
+export function waitForCsrfToken(): Promise<void> {
+  if (csrfToken) return Promise.resolve();
+  if (!pendingTokenRefresh) {
+    pendingTokenRefresh = getSession()
+      .then(() => {
+        if (!csrfToken) throw new Error('CSRF token missing from session response');
+      })
+      .finally(() => {
+        pendingTokenRefresh = null;
+      });
+  }
+  return pendingTokenRefresh;
 }
 
 /**
@@ -66,33 +97,12 @@ export function useSession() {
 }
 
 /**
- * Session provider (Desktop)
+ * Session provider
  */
 
-export const SessionProviderDesktop = ({ children }: React.PropsWithChildren) => {
-  const context = useMemo(
-    () => ({
-      session: {
-        auth_mode: 'auto',
-        user: 'auto',
-        message: null,
-        timestamp: new Date(),
-      },
-    }),
-    [],
-  );
-
-  return <Context.Provider value={context}>{children}</Context.Provider>;
-};
-
-/**
- * Session provider (Cluster)
- */
-
-export const SessionProviderCluster = ({ children }: React.PropsWithChildren) => {
+export const SessionProvider = ({ children }: React.PropsWithChildren) => {
   const [session, setSession] = useState<Session | undefined>(undefined);
 
-  // subscribe to broadcast messages
   useEffect(() => {
     let lastTS = 0;
     const fn = (ev: any) => {
@@ -103,36 +113,16 @@ export const SessionProviderCluster = ({ children }: React.PropsWithChildren) =>
       }
     };
     bcIn.addEventListener('message', fn);
-
-    // fetch on first mount
-    (async () => {
-      await getSession();
-    })();
-
+    getSession();
     return () => bcIn.removeEventListener('message', fn);
   }, []);
 
-  // fetch on visibility change
   useEffect(() => {
-    const fn = async () => {
-      await getSession();
-    };
     document.addEventListener('visibilitychange', getSession);
-    return () => document.removeEventListener('visibilitychange', fn);
+    return () => document.removeEventListener('visibilitychange', getSession);
   }, []);
 
   const context = useMemo(() => ({ session }), [session]);
 
   return <Context.Provider value={context}>{children}</Context.Provider>;
-};
-
-/**
- * Session provider
- */
-
-export const SessionProvider = ({ children }: React.PropsWithChildren) => {
-  if (appConfig.environment === 'desktop') {
-    return <SessionProviderDesktop>{children}</SessionProviderDesktop>;
-  }
-  return <SessionProviderCluster>{children}</SessionProviderCluster>;
 };

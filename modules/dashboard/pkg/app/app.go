@@ -49,7 +49,8 @@ type App struct {
 	queryHelpers    queryHelpers
 
 	// for testing
-	dynamicRoutes *gin.RouterGroup
+	dynamicRoutes   *gin.RouterGroup
+	protectedRoutes *gin.RouterGroup
 }
 
 // NotifyShutdown signals active connections to begin closing.
@@ -157,7 +158,11 @@ func NewApp(cfg *config.Config) (*App, error) {
 	dynamicRoutes := root.Group("/")
 	{
 		// Add session middleware
-		sessionStore := cookie.NewStore([]byte(cfg.Session.Secret))
+		keyPairs, err := resolveSessionKeyPairs(cfg)
+		if err != nil {
+			return nil, err
+		}
+		sessionStore := cookie.NewStore(keyPairs...)
 		sessionStore.Options(sessions.Options{
 			Path:     cfg.Session.Cookie.Path,
 			Domain:   cfg.Session.Cookie.Domain,
@@ -198,6 +203,8 @@ func NewApp(cfg *config.Config) (*App, error) {
 			// Add K8S auth middleware
 			protectedRoutes.Use(k8sAuthenticationMiddleware(cfg.AuthMode))
 
+			protectedRoutes.Use(websocketCSRFContextMiddleware())
+
 			// GraphQL endpoint
 			app.graphqlServer = graph.NewServer(cfg, app.cm)
 			protectedRoutes.Any("/graphql", gin.WrapH(app.graphqlServer))
@@ -209,6 +216,7 @@ func NewApp(cfg *config.Config) (*App, error) {
 			dl := newDownloadHandlers(app)
 			protectedRoutes.POST("/api/v1/download", dl.DownloadPOST)
 		}
+		app.protectedRoutes = protectedRoutes
 	}
 	app.dynamicRoutes = dynamicRoutes
 

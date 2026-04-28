@@ -24,7 +24,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/kubetail-org/kubetail/modules/dashboard/graph"
 	"github.com/kubetail-org/kubetail/modules/dashboard/pkg/config"
+	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
 )
 
 func TestAuthenticationMiddleware(t *testing.T) {
@@ -120,41 +122,139 @@ func TestAuthenticationMiddlewareRejectsWhitespaceToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
-func TestCSRFProtectionMiddleware(t *testing.T) {
+const csrfPreseededToken = "testtokenvalue1234"
+
+// runCSRFCase executes one CSRF middleware test case and returns the response.
+func runCSRFCase(t *testing.T, method string, header http.Header, seedToken bool) *http.Response {
+	t.Helper()
+
+	store := cookie.NewStore([]byte("secret"))
+	store.Options(sessions.Options{Path: "/", Secure: false})
+
+	router := gin.New()
+	router.Use(sessions.Sessions("session", store))
+	if seedToken {
+		router.Use(func(c *gin.Context) {
+			session := sessions.Default(c)
+			session.Set(csrfTokenSessionKey, csrfPreseededToken)
+			session.Save()
+			c.Next()
+		})
+	}
+	router.Use(csrfProtectionMiddleware())
+	router.Any("/", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(method, "/", nil)
+	for k, v := range header {
+		r.Header[k] = v
+	}
+	router.ServeHTTP(w, r)
+	return w.Result()
+}
+
+func TestCSRFProtectionMiddlewareAllows(t *testing.T) {
 	tests := []struct {
-		name           string
-		method         string
-		setHeader      http.Header
-		wantStatusCode int
+		name      string
+		method    string
+		setHeader http.Header
+		seedToken bool
 	}{
 		// Safe methods bypass the check (no state change to protect).
-		{"GET without Sec-Fetch-Site is allowed", "GET", http.Header{}, http.StatusOK},
-		{"GET cross-site is allowed", "GET", http.Header{"Sec-Fetch-Site": []string{"cross-site"}}, http.StatusOK},
-		{"HEAD without Sec-Fetch-Site is allowed", "HEAD", http.Header{}, http.StatusOK},
-		{"OPTIONS without Sec-Fetch-Site is allowed", "OPTIONS", http.Header{}, http.StatusOK},
-		// Unsafe methods enforce same-origin Sec-Fetch-Site.
-		{"POST without Sec-Fetch-Site is blocked", "POST", http.Header{}, http.StatusForbidden},
-		{"POST same-origin is allowed", "POST", http.Header{"Sec-Fetch-Site": []string{"same-origin"}}, http.StatusOK},
-		{"POST cross-site is blocked", "POST", http.Header{"Sec-Fetch-Site": []string{"cross-site"}}, http.StatusForbidden},
-		{"DELETE cross-site is blocked", "DELETE", http.Header{"Sec-Fetch-Site": []string{"cross-site"}}, http.StatusForbidden},
+		{
+			name:      "GET without Sec-Fetch-Site",
+			method:    "GET",
+			setHeader: http.Header{},
+			seedToken: false,
+		},
+		{
+			name:      "GET cross-site",
+			method:    "GET",
+			setHeader: http.Header{"Sec-Fetch-Site": []string{"cross-site"}},
+			seedToken: false,
+		},
+		{
+			name:      "HEAD without Sec-Fetch-Site",
+			method:    "HEAD",
+			setHeader: http.Header{},
+			seedToken: false,
+		},
+		{
+			name:      "OPTIONS without Sec-Fetch-Site",
+			method:    "OPTIONS",
+			setHeader: http.Header{},
+			seedToken: false,
+		},
+		// Unsafe same-origin requests with a valid CSRF token are allowed.
+		{
+			name:      "POST same-origin with correct X-CSRF-Token",
+			method:    "POST",
+			setHeader: http.Header{"Sec-Fetch-Site": []string{"same-origin"}, "X-Csrf-Token": []string{csrfPreseededToken}},
+			seedToken: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			router := gin.New()
-			router.Use(csrfProtectionMiddleware())
-			router.Any("/", func(c *gin.Context) {
-				c.String(http.StatusOK, "ok")
-			})
+			resp := runCSRFCase(t, tt.method, tt.setHeader, tt.seedToken)
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+		})
+	}
+}
 
-			w := httptest.NewRecorder()
-			r := httptest.NewRequest(tt.method, "/", nil)
-			for k, v := range tt.setHeader {
-				r.Header[k] = v
-			}
-			router.ServeHTTP(w, r)
+func TestCSRFProtectionMiddlewareForbids(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		setHeader http.Header
+		seedToken bool
+	}{
+		// Unsafe methods require same-origin Sec-Fetch-Site.
+		{
+			name:      "POST without Sec-Fetch-Site",
+			method:    "POST",
+			setHeader: http.Header{},
+			seedToken: false,
+		},
+		{
+			name:      "POST cross-site",
+			method:    "POST",
+			setHeader: http.Header{"Sec-Fetch-Site": []string{"cross-site"}},
+			seedToken: false,
+		},
+		{
+			name:      "DELETE cross-site",
+			method:    "DELETE",
+			setHeader: http.Header{"Sec-Fetch-Site": []string{"cross-site"}},
+			seedToken: false,
+		},
+		// Unsafe same-origin requests still require a valid CSRF token.
+		{
+			name:      "POST same-origin without session token",
+			method:    "POST",
+			setHeader: http.Header{"Sec-Fetch-Site": []string{"same-origin"}},
+			seedToken: false,
+		},
+		{
+			name:      "POST same-origin with no X-CSRF-Token header",
+			method:    "POST",
+			setHeader: http.Header{"Sec-Fetch-Site": []string{"same-origin"}},
+			seedToken: true,
+		},
+		{
+			name:      "POST same-origin with wrong X-CSRF-Token",
+			method:    "POST",
+			setHeader: http.Header{"Sec-Fetch-Site": []string{"same-origin"}, "X-Csrf-Token": []string{"wrongtoken"}},
+			seedToken: true,
+		},
+	}
 
-			assert.Equal(t, tt.wantStatusCode, w.Result().StatusCode)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := runCSRFCase(t, tt.method, tt.setHeader, tt.seedToken)
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 		})
 	}
 }
@@ -203,6 +303,98 @@ func TestK8sTokenRequiredMiddleware(t *testing.T) {
 			resp := w.Result()
 			assert.Equal(t, "no-store", resp.Header["Cache-Control"][0])
 			assert.Equal(t, tt.wantStatusCode, resp.StatusCode)
+		})
+	}
+}
+
+func TestWebSocketCSRFContextMiddleware(t *testing.T) {
+	const sessTok = "session-csrf-token"
+
+	tests := []struct {
+		name          string
+		hasSession    bool
+		isUpgrade     bool
+		clientHeader  string // value sent by client; "" = absent
+		wantCtxValue  any
+		wantOutHeader string
+	}{
+		{
+			name:          "WS upgrade with session: ctx and header set from session",
+			hasSession:    true,
+			isUpgrade:     true,
+			wantCtxValue:  sessTok,
+			wantOutHeader: sessTok,
+		},
+		{
+			name:         "non-WS request leaves ctx and header unset even with session",
+			hasSession:   true,
+			isUpgrade:    false,
+			wantCtxValue: nil,
+		},
+		{
+			name:         "WS upgrade without session leaves ctx and header unset",
+			isUpgrade:    true,
+			wantCtxValue: nil,
+		},
+		{
+			name:         "client-supplied X-Forwarded-CSRF-Token is stripped (no session)",
+			isUpgrade:    true,
+			clientHeader: "spoofed",
+			wantCtxValue: nil,
+		},
+		{
+			name:          "client-supplied X-Forwarded-CSRF-Token is overwritten (with session)",
+			hasSession:    true,
+			isUpgrade:     true,
+			clientHeader:  "spoofed",
+			wantCtxValue:  sessTok,
+			wantOutHeader: sessTok,
+		},
+		{
+			name:         "non-WS request strips client-supplied X-Forwarded-CSRF-Token",
+			isUpgrade:    false,
+			clientHeader: "spoofed",
+			wantCtxValue: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := gin.New()
+			router.Use(sessions.Sessions("session", cookie.NewStore([]byte("xx"))))
+			router.Use(func(c *gin.Context) {
+				if tt.hasSession {
+					session := sessions.Default(c)
+					session.Set(csrfTokenSessionKey, sessTok)
+					session.Save()
+				}
+				c.Next()
+			})
+			router.Use(websocketCSRFContextMiddleware())
+
+			var (
+				gotCtxValue  any
+				gotOutHeader string
+			)
+			router.GET("/", func(c *gin.Context) {
+				gotCtxValue = c.Request.Context().Value(graph.SessionCSRFTokenCtxKey)
+				gotOutHeader = c.Request.Header.Get(httphelpers.HeaderForwardedCSRFToken)
+				c.String(http.StatusOK, "ok")
+			})
+
+			r := httptest.NewRequest("GET", "/", nil)
+			if tt.isUpgrade {
+				r.Header.Set("Connection", "Upgrade")
+				r.Header.Set("Upgrade", "websocket")
+			}
+			if tt.clientHeader != "" {
+				r.Header.Set(httphelpers.HeaderForwardedCSRFToken, tt.clientHeader)
+			}
+
+			router.ServeHTTP(httptest.NewRecorder(), r)
+
+			assert.Equal(t, tt.wantCtxValue, gotCtxValue)
+			assert.Equal(t, tt.wantOutHeader, gotOutHeader)
 		})
 	}
 }
