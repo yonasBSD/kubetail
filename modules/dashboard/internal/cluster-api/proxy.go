@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 
+	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/proxy"
 
 	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
@@ -315,14 +316,17 @@ func newInClusterProxy(kubeAPIServerEndpoint string, pathPrefix string, allowedO
 		Director: func(r *http.Request) {
 			// Rewrite to the cluster-api APIService path on the apiserver.
 			rel := strings.TrimPrefix(r.URL.Path, pathPrefix)
-			targetUrl := endpointUrl
-			targetUrl.Path = path.Join(APIServicePath, rel)
-			r.URL = targetUrl
+			u := *endpointUrl // copy struct value so concurrent requests don't share state
+			u.Path = path.Join(APIServicePath, rel)
+			r.URL = &u
+			r.Host = ""
 
 			// Drop client-supplied auth headers so a malicious upstream
-			// header can't ride through. Then forward the session user's
-			// token as Authorization (kube-apiserver auths the caller as
-			// that user; aggregation then attaches front-proxy headers).
+			// header can't ride through. If a session user's token is
+			// present, forward it as Authorization (kube-apiserver auths
+			// the caller as that user). Otherwise leave Authorization
+			// unset so the transport's BearerAuthRoundTripper falls back
+			// to the dashboard's own ServiceAccount credentials.
 			r.Header.Del("Authorization")
 			r.Header.Del("X-Forwarded-Authorization")
 			if token, ok := r.Context().Value(k8shelpers.K8STokenCtxKey).(string); ok && token != "" {
@@ -373,9 +377,14 @@ func NewInClusterProxy(cm k8shelpers.ConnectionManager, pathPrefix string, allow
 		return nil, err
 	}
 
-	rt, err := k8shelpers.NewInClusterSATRoundTripper(http.DefaultTransport)
+	// Build a transport using the dashboard's own credentials (its
+	// ServiceAccount). When the Director sets Authorization from a user-
+	// supplied bearer token, client-go's BearerAuthRoundTripper leaves it
+	// alone; otherwise the SA token is injected as a fallback so requests
+	// authenticate as the dashboard itself.
+	transport, err := rest.TransportFor(restConfig)
 	if err != nil {
 		return nil, err
 	}
-	return newInClusterProxy(restConfig.Host, pathPrefix, allowedOrigins, rt)
+	return newInClusterProxy(restConfig.Host, pathPrefix, allowedOrigins, transport)
 }

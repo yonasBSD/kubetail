@@ -16,14 +16,17 @@ package clusterapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/rest"
 
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
@@ -165,6 +168,59 @@ func TestInClusterProxy_ForwardsUserTokenAsAuthorization(t *testing.T) {
 
 			assert.Equal(t, tt.wantAuth, capturedAuth)
 			assert.Equal(t, tt.wantFwd, capturedFwd)
+		})
+	}
+}
+
+// Verifies the SA-token fallback behavior introduced when NewInClusterProxy
+// switched from rest.AnonymousClientConfig to rest.TransportFor(restConfig).
+// With a non-anonymous transport, BearerAuthRoundTripper injects the
+// dashboard's SA token only when the Director has not already set
+// Authorization from a user-supplied bearer token.
+func TestInClusterProxy_FallsBackToServiceAccountTokenWithoutUserToken(t *testing.T) {
+	const saToken = "dashboard-sa-token"
+
+	tests := []struct {
+		name      string
+		userToken string
+		wantAuth  string
+	}{
+		{
+			name:      "user token forwarded, SA token suppressed",
+			userToken: "user-token-123",
+			wantAuth:  "Bearer user-token-123",
+		},
+		{
+			name:      "SA token used when no user token in context",
+			userToken: "",
+			wantAuth:  "Bearer " + saToken,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var capturedAuth string
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedAuth = r.Header.Get("Authorization")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer backend.Close()
+
+			transport, err := rest.TransportFor(&rest.Config{BearerToken: saToken})
+			require.NoError(t, err)
+
+			proxy, err := newInClusterProxy(backend.URL, "/prefix", nil, transport)
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodGet, "/prefix/somepath", nil)
+			if tt.userToken != "" {
+				ctx := context.WithValue(req.Context(), k8shelpers.K8STokenCtxKey, tt.userToken)
+				req = req.WithContext(ctx)
+			}
+
+			proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+			assert.Equal(t, tt.wantAuth, capturedAuth)
 		})
 	}
 }
@@ -560,4 +616,80 @@ func TestDesktopProxy_NotifyShutdown_ClosesConnections(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, proxy.DrainWithContext(ctx))
+}
+
+// --- TLS transport tests ---
+
+func TestInClusterProxy_TLSBackend_Returns502WithDefaultTransport(t *testing.T) {
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	proxy, err := newInClusterProxy(backend.URL, "/prefix", nil, http.DefaultTransport)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/prefix/graphql", nil)
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+func TestInClusterProxy_TLSBackend_SucceedsWithMatchingTransport(t *testing.T) {
+	var called bool
+	backend := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	proxy, err := newInClusterProxy(backend.URL, "/prefix", nil, backend.Client().Transport)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/prefix/graphql", nil)
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, called)
+}
+
+// --- URL isolation test (run with -race to detect data race) ---
+
+func TestInClusterProxy_Director_IsolatesURLPerRequest(t *testing.T) {
+	var mu sync.Mutex
+	received := make(map[string]int)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		received[r.URL.Path]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	proxy, err := newInClusterProxy(backend.URL, "/prefix", nil, http.DefaultTransport)
+	require.NoError(t, err)
+
+	proxyServer := httptest.NewServer(proxy)
+	defer proxyServer.Close()
+
+	const n = 20
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _ = http.Get(fmt.Sprintf("%s/prefix/path%d", proxyServer.URL, i)) //nolint:noctx
+		}(i)
+	}
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i := range n {
+		p := fmt.Sprintf("/apis/api.kubetail.com/v1/path%d", i)
+		assert.Equal(t, 1, received[p], "path %s should reach backend exactly once", p)
+	}
 }
