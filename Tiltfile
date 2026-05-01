@@ -219,7 +219,7 @@ k8s_resource(
 
 k8s_resource(
   'kubetail-cluster-api',
-  port_forwards='4501:8080',
+  port_forwards='4501:8443',
   objects=[
     'kubetail-cluster-api:configmap',
     'kubetail-cluster-api:serviceaccount',
@@ -228,6 +228,9 @@ k8s_resource(
     'kubetail-cluster-api:role',
     'kubetail-cluster-api:rolebinding',
     'kubetail-cluster-api-tls:secret',
+    'kubetail-cluster-api-auth-delegator:clusterrolebinding',
+    'kubetail-cluster-api-auth-reader:rolebinding',
+    'v1.api.kubetail.com:apiservice',
   ],
   resource_deps=['kubetail-shared'],
 )
