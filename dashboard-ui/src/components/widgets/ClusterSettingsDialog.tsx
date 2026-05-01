@@ -54,13 +54,13 @@ const ClusterAPIPickerDesktop = ({ kubeContext }: ClusterAPIPickerDesktopProps) 
  */
 
 const ClusterAPIPickerCluster = () => (
-  <Select value={appConfig.clusterAPIEndpoint ? 'enabled' : 'disabled'} disabled>
+  <Select value={appConfig.clusterAPIEnabled ? 'enabled' : 'disabled'} disabled>
     <SelectTrigger>
       <SelectValue />
     </SelectTrigger>
     <SelectContent>
-      {appConfig.clusterAPIEndpoint ? (
-        <SelectItem value="enabled">{appConfig.clusterAPIEndpoint}</SelectItem>
+      {appConfig.clusterAPIEnabled ? (
+        <SelectItem value="enabled">/apis/api.kubetail.com/v1</SelectItem>
       ) : (
         <SelectItem value="disabled">Disabled</SelectItem>
       )}

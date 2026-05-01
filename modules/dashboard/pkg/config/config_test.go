@@ -65,3 +65,16 @@ allowed-origins:
 `)
 	assert.Error(t, err)
 }
+
+func TestDefaultClusterAPIEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.True(t, cfg.ClusterAPIEnabled)
+}
+
+func TestClusterAPIEnabledFromYAML(t *testing.T) {
+	cfg, err := loadYAML(t, `
+cluster-api-enabled: false
+`)
+	require.NoError(t, err)
+	assert.False(t, cfg.ClusterAPIEnabled)
+}

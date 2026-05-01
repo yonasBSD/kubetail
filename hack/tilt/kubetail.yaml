@@ -13,11 +13,8 @@ data:
     addr: :8080
     auth-mode: auto
     base-path: /
-    # Reach the cluster-api via the Kubernetes API aggregation layer.
-    cluster-api-endpoint: https://kubernetes.default.svc
+    cluster-api-enabled: true
     gin-mode: debug
-    ui:
-      cluster-api-enabled: true
     session:
       key-pairs:
         - signing-key: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
@@ -136,6 +133,9 @@ rules:
   - apiGroups: [authentication.k8s.io]
     resources: [tokenreviews]
     verbs: [create]
+  - apiGroups: [apiregistration.k8s.io]
+    resources: [apiservices]
+    verbs: [get, list, watch]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

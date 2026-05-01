@@ -33,8 +33,6 @@ class Config {
 
   clusterAPIEnabled = true;
 
-  clusterAPIEndpoint = '';
-
   columns: string[] = ['timestamp', 'dot'];
 
   environment = 'desktop';

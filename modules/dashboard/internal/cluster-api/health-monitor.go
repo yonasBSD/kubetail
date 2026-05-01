@@ -18,32 +18,24 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
-	discoveryv1 "k8s.io/api/discovery/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/ptr"
+	aggregatorclientset "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
 
 	"github.com/kubetail-org/kubetail/modules/dashboard/pkg/config"
 	sharedcfg "github.com/kubetail-org/kubetail/modules/shared/config"
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 	"github.com/kubetail-org/kubetail/modules/shared/util"
-	"github.com/kubetail-org/megaphone"
 )
 
 // Represents HealthStatus enum
 type HealthStatus string
 
 const (
-	HealthStatusSuccess  = "SUCCESS"
-	HealthStatusFailure  = "FAILURE"
-	HealthStatusPending  = "PENDING"
-	HealthStatusNotFound = "NOTFOUND"
-	HealthStatusUknown   = "UNKNOWN"
+	HealthStatusSuccess  HealthStatus = "SUCCESS"
+	HealthStatusFailure  HealthStatus = "FAILURE"
+	HealthStatusPending  HealthStatus = "PENDING"
+	HealthStatusNotFound HealthStatus = "NOTFOUND"
+	HealthStatusUknown   HealthStatus = "UNKNOWN"
 )
 
 // Represents HealthMonitor
@@ -60,7 +52,7 @@ func NewHealthMonitor(cfg *config.Config, cm k8shelpers.ConnectionManager) Healt
 	case sharedcfg.EnvironmentDesktop:
 		return NewDesktopHealthMonitor(cm)
 	case sharedcfg.EnvironmentCluster:
-		return NewInClusterHealthMonitor(cm, cfg.ClusterAPIEndpoint)
+		return NewInClusterHealthMonitor(cm, cfg.ClusterAPIEnabled)
 	default:
 		panic("not implemented")
 	}
@@ -135,31 +127,25 @@ func (hm *DesktopHealthMonitor) getOrCreateWorker(ctx context.Context, kubeConte
 	// Check cache
 	worker, ok := hm.workerCache.Load(kubeContext)
 	if !ok {
-		// Get clientset
-		clientset, err := hm.cm.GetOrCreateClientset(kubeContext)
+		restConfig, err := hm.cm.GetOrCreateRestConfig(kubeContext)
 		if err != nil {
 			return nil, err
 		}
 
-		// Check if the Kubernetes API supports EndpointSlices
-		resources, err := clientset.Discovery().ServerResourcesForGroupVersion("discovery.k8s.io/v1")
-		if err != nil || resources == nil {
-			// EndpointSlices not supported, initialize NoopHealthMonitor
-			worker = newNoopHealthMonitorWorker()
-		} else {
-			// EndpointSlices supported, initialize EndpointSlicesHealthMonitor
-			worker, err = newEndpointSlicesHealthMonitorWorker(clientset, DefaultNamespace, DefaultServiceName)
-			if err != nil {
-				return nil, err
-			}
+		client, err := aggregatorclientset.NewForConfig(restConfig)
+		if err != nil {
+			return nil, err
 		}
 
-		// Start background processes and wait for cache to sync
+		worker, err = newAPIServiceHealthMonitorWorker(client)
+		if err != nil {
+			return nil, err
+		}
+
 		if err := worker.Start(ctx); err != nil {
 			return nil, err
 		}
 
-		// Add to cache
 		hm.workerCache.Store(kubeContext, worker)
 	}
 
@@ -168,24 +154,19 @@ func (hm *DesktopHealthMonitor) getOrCreateWorker(ctx context.Context, kubeConte
 
 // Respresents InClusterHealthMonitor
 type InClusterHealthMonitor struct {
-	cm                 k8shelpers.ConnectionManager
-	clusterAPIEndpoint string
-	worker             healthMonitorWorker
-	mu                 sync.Mutex
+	cm     k8shelpers.ConnectionManager
+	worker healthMonitorWorker
+	mu     sync.Mutex
 }
 
-// Create new InClusterHealthMonitor instance
-func NewInClusterHealthMonitor(cm k8shelpers.ConnectionManager, clusterAPIEndpoint string) *InClusterHealthMonitor {
-	hm := &InClusterHealthMonitor{
-		cm:                 cm,
-		clusterAPIEndpoint: clusterAPIEndpoint,
-	}
-
-	if clusterAPIEndpoint == "" {
-		// Initialize NoopHealthMonitor and return
+// NewInClusterHealthMonitor returns an in-cluster health monitor. Pass
+// enabled=false (e.g. when the cluster-api isn't deployed) to install a
+// noop worker that always reports an Unknown status.
+func NewInClusterHealthMonitor(cm k8shelpers.ConnectionManager, enabled bool) *InClusterHealthMonitor {
+	hm := &InClusterHealthMonitor{cm: cm}
+	if !enabled {
 		hm.worker = newNoopHealthMonitorWorker()
 	}
-
 	return hm
 }
 
@@ -228,42 +209,26 @@ func (hm *InClusterHealthMonitor) getOrCreateWorker(ctx context.Context) (health
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
 
-	// Check cache
 	if hm.worker == nil {
-		// Parse endpoint url
-		connectArgs, err := parseConnectUrl(hm.clusterAPIEndpoint)
+		restConfig, err := hm.cm.GetOrCreateRestConfig("")
 		if err != nil {
 			return nil, err
 		}
 
-		// Get clientset
-		clientset, err := hm.cm.GetOrCreateClientset("")
+		client, err := aggregatorclientset.NewForConfig(restConfig)
 		if err != nil {
 			return nil, err
 		}
 
-		var worker healthMonitorWorker
-
-		// Check if the Kubernetes API supports EndpointSlices
-		resources, err := clientset.Discovery().ServerResourcesForGroupVersion("discovery.k8s.io/v1")
-		if err != nil || resources == nil {
-			// EndpointSlices not supported, initialize NoopHealthMonitor
-			worker = newNoopHealthMonitorWorker()
-		} else {
-			// EndpointSlices supported, initialize EndpointSlicesHealthMonitor
-			worker, err = newEndpointSlicesHealthMonitorWorker(clientset, connectArgs.Namespace, connectArgs.ServiceName)
-			if err != nil {
-				return nil, err
-			}
-
+		worker, err := newAPIServiceHealthMonitorWorker(client)
+		if err != nil {
+			return nil, err
 		}
 
-		// Start background processes
 		if err := worker.Start(ctx); err != nil {
 			return nil, err
 		}
 
-		// Cache worker
 		hm.worker = worker
 	}
 
@@ -277,217 +242,6 @@ type healthMonitorWorker interface {
 	GetHealthStatus() HealthStatus
 	WatchHealthStatus(ctx context.Context) (<-chan HealthStatus, error)
 	ReadyWait(ctx context.Context) error
-}
-
-// Represents endpointSlicesHealthMonitorWorker
-type endpointSlicesHealthMonitorWorker struct {
-	lastStatus HealthStatus
-	factory    informers.SharedInformerFactory
-	informer   cache.SharedIndexInformer
-	esCache    map[string]*discoveryv1.EndpointSlice
-	mp         megaphone.Megaphone[HealthStatus]
-	shutdownCh chan struct{}
-	mu         sync.RWMutex
-}
-
-// Create new endpointSlicesHealthMonitorWorker instance
-func newEndpointSlicesHealthMonitorWorker(clientset kubernetes.Interface, namespace string, serviceName string) (*endpointSlicesHealthMonitorWorker, error) {
-	// Init factory
-	labelSelector := labels.Set{
-		discoveryv1.LabelServiceName: serviceName,
-	}.String()
-
-	factory := informers.NewFilteredSharedInformerFactory(clientset, 10*time.Minute, namespace, func(options *metav1.ListOptions) {
-		options.LabelSelector = labelSelector
-	})
-
-	// Init informer
-	informer := factory.Discovery().V1().EndpointSlices().Informer()
-
-	// Initialize instance
-	w := &endpointSlicesHealthMonitorWorker{
-		lastStatus: HealthStatusUknown,
-		factory:    factory,
-		informer:   informer,
-		esCache:    make(map[string]*discoveryv1.EndpointSlice),
-		mp:         megaphone.New[HealthStatus](),
-		shutdownCh: make(chan struct{}),
-	}
-
-	// Register event handlers
-	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    w.onInformerAdd,
-		UpdateFunc: w.onInformerUpdate,
-		DeleteFunc: w.onInformerDelete,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return w, nil
-}
-
-// Start
-func (w *endpointSlicesHealthMonitorWorker) Start(ctx context.Context) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	// Start background processes
-	w.factory.Start(w.shutdownCh)
-
-	// Wait for cache to sync
-	if !cache.WaitForCacheSync(ctx.Done(), w.informer.HasSynced) {
-		return fmt.Errorf("failed to sync")
-	}
-
-	// Exit if context canceled
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-
-	// Init cache
-	for _, obj := range w.informer.GetStore().List() {
-		es := obj.(*discoveryv1.EndpointSlice)
-		w.esCache[string(es.UID)] = es
-	}
-
-	// Init status
-	w.updateHealthStatus_UNSAFE()
-
-	return nil
-}
-
-// Shutdown
-func (w *endpointSlicesHealthMonitorWorker) Shutdown() {
-	close(w.shutdownCh)
-	w.factory.Shutdown()
-}
-
-// GetHealthStatus
-func (w *endpointSlicesHealthMonitorWorker) GetHealthStatus() HealthStatus {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.lastStatus
-}
-
-// WatchHealthStatus
-func (w *endpointSlicesHealthMonitorWorker) WatchHealthStatus(ctx context.Context) (<-chan HealthStatus, error) {
-	outCh := make(chan HealthStatus)
-
-	var mu sync.Mutex
-	var lastStatus *HealthStatus
-
-	sendStatus := func(newStatus HealthStatus) {
-		mu.Lock()
-		defer mu.Unlock()
-		if ctx.Err() == nil && (lastStatus == nil || *lastStatus != newStatus) {
-			lastStatus = &newStatus
-			outCh <- newStatus
-		}
-	}
-
-	// Subscribe to updates
-	sub, err := w.mp.Subscribe("UPDATE", sendStatus)
-	if err != nil {
-		return nil, err
-	}
-
-	go func() {
-		// send initial state
-		sendStatus(w.GetHealthStatus())
-
-		// Wait for client to close
-		<-ctx.Done()
-
-		// Unsubscribe
-		sub.Drain()
-
-		// Close output channel
-		close(outCh)
-	}()
-
-	return outCh, nil
-}
-
-// ReadyWait
-func (w *endpointSlicesHealthMonitorWorker) ReadyWait(ctx context.Context) error {
-	if w.GetHealthStatus() == HealthStatusSuccess {
-		return nil
-	}
-
-	// Otherwise, watch for updates until success or context canceled
-	ch, err := w.WatchHealthStatus(ctx)
-	if err != nil {
-		return err
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case status := <-ch:
-			if status == HealthStatusSuccess {
-				return nil
-			}
-		}
-	}
-}
-
-// onInformerAdd
-func (w *endpointSlicesHealthMonitorWorker) onInformerAdd(obj interface{}) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	es := obj.(*discoveryv1.EndpointSlice)
-	w.esCache[string(es.UID)] = es
-	w.updateHealthStatus_UNSAFE()
-}
-
-// onInformerUpdate
-func (w *endpointSlicesHealthMonitorWorker) onInformerUpdate(oldObj, newObj interface{}) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	es := newObj.(*discoveryv1.EndpointSlice)
-	w.esCache[string(es.UID)] = es
-	w.updateHealthStatus_UNSAFE()
-}
-
-// onInformerDelete
-func (w *endpointSlicesHealthMonitorWorker) onInformerDelete(obj interface{}) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	es := obj.(*discoveryv1.EndpointSlice)
-	delete(w.esCache, string(es.UID))
-	w.updateHealthStatus_UNSAFE()
-}
-
-func (w *endpointSlicesHealthMonitorWorker) getHealthStatus_UNSAFE() HealthStatus {
-	if len(w.esCache) == 0 {
-		return HealthStatusNotFound
-	}
-
-	for _, es := range w.esCache {
-		for _, endpoint := range es.Endpoints {
-			if ptr.Deref(endpoint.Conditions.Ready, false) {
-				return HealthStatusSuccess
-			}
-		}
-	}
-
-	return HealthStatusFailure
-}
-
-func (w *endpointSlicesHealthMonitorWorker) updateHealthStatus_UNSAFE() {
-	newStatus := w.getHealthStatus_UNSAFE()
-
-	// Handle "pending"
-	if newStatus == HealthStatusFailure && (w.lastStatus == HealthStatusNotFound || w.lastStatus == HealthStatusPending) {
-		newStatus = HealthStatusPending
-	}
-
-	if newStatus != w.lastStatus {
-		w.lastStatus = newStatus
-		w.mp.Publish("UPDATE", newStatus)
-	}
 }
 
 // Represents noopHealthMonitorWorker

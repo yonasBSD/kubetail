@@ -25,7 +25,6 @@ import (
 	k8shelpersmock "github.com/kubetail-org/kubetail/modules/shared/k8shelpers/mock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 // MockHealthMonitorWorker is a testify-based mock implementation of the healthMonitorWorker interface
@@ -81,52 +80,41 @@ func TestNewHealthMonitor(t *testing.T) {
 	tests := []struct {
 		name        string
 		environment sharedcfg.Environment
-		endpoint    string
-		want        interface{}
+		enabled     bool
+		want        any
 	}{
 		{
 			name:        "Desktop environment",
 			environment: sharedcfg.EnvironmentDesktop,
-			endpoint:    "",
 			want:        &DesktopHealthMonitor{},
 		},
 		{
-			name:        "Cluster environment",
+			name:        "Cluster environment, cluster-api disabled",
 			environment: sharedcfg.EnvironmentCluster,
-			endpoint:    "",
+			enabled:     false,
 			want:        &InClusterHealthMonitor{},
 		},
 		{
-			name:        "Cluster environment with endpoint",
+			name:        "Cluster environment, cluster-api enabled",
 			environment: sharedcfg.EnvironmentCluster,
-			endpoint:    "kubetail-cluster-api.kubetail-system.svc.cluster.local:50051",
+			enabled:     true,
 			want:        &InClusterHealthMonitor{},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// create connection manager
 			cm := &k8shelpersmock.MockConnectionManager{}
 
-			// create config
 			cfg := config.DefaultConfig()
 			cfg.Environment = tt.environment
-			if tt.endpoint != "" {
-				cfg.ClusterAPIEndpoint = tt.endpoint
-			}
+			cfg.ClusterAPIEnabled = tt.enabled
 
-			// create health monitor
 			hm := NewHealthMonitor(cfg, cm)
 
-			// assert health monitor is not nil
 			assert.NotNil(t, hm)
-
-			// assert health monitor is of the expected type
 			assert.IsType(t, tt.want, hm)
-
 		})
 	}
-
 }
 
 func TestNewHealthMonitor_InvalidEnvironment(t *testing.T) {
@@ -218,7 +206,7 @@ func TestInClusterHealthMonitor_Shutdown(t *testing.T) {
 			cm := &k8shelpersmock.MockConnectionManager{}
 
 			// create health monitor
-			hm := NewInClusterHealthMonitor(cm, "kubetail-cluster-api.kubetail-system.svc.cluster.local:50051")
+			hm := NewInClusterHealthMonitor(cm, true)
 			var worker *MockHealthMonitorWorker
 
 			// create mock health monitor worker
@@ -303,10 +291,7 @@ func TestDesktopHealthMonitor_GetHealthStatus(t *testing.T) {
 			cm := &k8shelpersmock.MockConnectionManager{}
 
 			if tt.setupMockError {
-				cm.On("GetOrCreateClientset", tt.kubeContext).Return(nil, fmt.Errorf("connection error"))
-			} else {
-				mockClientset := fake.NewClientset()
-				cm.On("GetOrCreateClientset", tt.kubeContext).Return(mockClientset, nil)
+				cm.On("GetOrCreateRestConfig", tt.kubeContext).Return(nil, fmt.Errorf("connection error"))
 			}
 
 			hm := NewDesktopHealthMonitor(cm)
@@ -374,13 +359,10 @@ func TestInClusterHealthMonitor_GetHealthStatus(t *testing.T) {
 			cm := &k8shelpersmock.MockConnectionManager{}
 
 			if tt.setupMockError {
-				cm.On("GetOrCreateClientset", "").Return(nil, fmt.Errorf("connection error"))
-			} else {
-				mockClientset := fake.NewClientset()
-				cm.On("GetOrCreateClientset", "").Return(mockClientset, nil)
+				cm.On("GetOrCreateRestConfig", "").Return(nil, fmt.Errorf("connection error"))
 			}
 
-			hm := NewInClusterHealthMonitor(cm, tt.endpoint)
+			hm := NewInClusterHealthMonitor(cm, tt.endpoint != "")
 
 			if !tt.setupMockError {
 				mockWorker := new(MockHealthMonitorWorker)
@@ -464,10 +446,7 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 			cm := &k8shelpersmock.MockConnectionManager{}
 
 			if tt.setupMockError {
-				cm.On("GetOrCreateClientset", tt.kubeContext).Return(nil, fmt.Errorf("connection error"))
-			} else {
-				mockClientset := fake.NewClientset()
-				cm.On("GetOrCreateClientset", tt.kubeContext).Return(mockClientset, nil)
+				cm.On("GetOrCreateRestConfig", tt.kubeContext).Return(nil, fmt.Errorf("connection error"))
 			}
 
 			hm := NewDesktopHealthMonitor(cm)
@@ -503,8 +482,6 @@ func TestDesktopHealthMonitor_WatchHealthStatus_ContextCancellation(t *testing.T
 	// Setup
 	cm := &k8shelpersmock.MockConnectionManager{}
 	kubeContext := "test-context"
-	mockClientset := fake.NewClientset()
-	cm.On("GetOrCreateClientset", kubeContext).Return(mockClientset, nil)
 
 	hm := NewDesktopHealthMonitor(cm)
 	mockWorker := new(MockHealthMonitorWorker)
@@ -576,13 +553,10 @@ func TestInClusterHealthMonitor_WatchHealthStatus(t *testing.T) {
 			cm := &k8shelpersmock.MockConnectionManager{}
 
 			if tt.setupMockError {
-				cm.On("GetOrCreateClientset", "").Return(nil, fmt.Errorf("connection error"))
-			} else {
-				mockClientset := fake.NewClientset()
-				cm.On("GetOrCreateClientset", "").Return(mockClientset, nil)
+				cm.On("GetOrCreateRestConfig", "").Return(nil, fmt.Errorf("connection error"))
 			}
 
-			hm := NewInClusterHealthMonitor(cm, tt.endpoint)
+			hm := NewInClusterHealthMonitor(cm, tt.endpoint != "")
 			mockWorker := new(MockHealthMonitorWorker)
 			hm.worker = mockWorker
 
@@ -605,11 +579,8 @@ func TestInClusterHealthMonitor_WatchHealthStatus(t *testing.T) {
 func TestInClusterHealthMonitor_WatchHealthStatus_ContextCancellation(t *testing.T) {
 	// Setup
 	cm := &k8shelpersmock.MockConnectionManager{}
-	kubeContext := "test-context"
-	mockClientset := fake.NewClientset()
-	cm.On("GetOrCreateClientset", kubeContext).Return(mockClientset, nil)
 
-	hm := NewInClusterHealthMonitor(cm, "")
+	hm := NewInClusterHealthMonitor(cm, false)
 	mockWorker := new(MockHealthMonitorWorker)
 	hm.worker = mockWorker
 
@@ -652,8 +623,6 @@ func TestDesktopHealthMonitor_ReadyWait_Immediate_Success(t *testing.T) {
 	// Setup
 	cm := &k8shelpersmock.MockConnectionManager{}
 	kubeContext := "test-context"
-	mockClientset := fake.NewClientset()
-	cm.On("GetOrCreateClientset", kubeContext).Return(mockClientset, nil)
 
 	hm := NewDesktopHealthMonitor(cm)
 	mockWorker := new(MockHealthMonitorWorker)
@@ -674,8 +643,6 @@ func TestDesktopHealthMonitor_ReadyWait_WaitSuccess(t *testing.T) {
 	// Setup
 	cm := &k8shelpersmock.MockConnectionManager{}
 	kubeContext := "test-context"
-	mockClientset := fake.NewClientset()
-	cm.On("GetOrCreateClientset", kubeContext).Return(mockClientset, nil)
 
 	hm := NewDesktopHealthMonitor(cm)
 	mockWorker := new(MockHealthMonitorWorker)
@@ -696,8 +663,6 @@ func TestDesktopHealthMonitor_ReadyWait_WaitFailure(t *testing.T) {
 	// Setup
 	cm := &k8shelpersmock.MockConnectionManager{}
 	kubeContext := "test-context"
-	mockClientset := fake.NewClientset()
-	cm.On("GetOrCreateClientset", kubeContext).Return(mockClientset, nil)
 
 	hm := NewDesktopHealthMonitor(cm)
 	mockWorker := new(MockHealthMonitorWorker)
@@ -723,9 +688,7 @@ func TestInClusterHealthMonitor_ReadyWait_ImmediateSuccess(t *testing.T) {
 	// Setup
 	cm := &k8shelpersmock.MockConnectionManager{}
 	kubeContext := "test-context"
-	mockClientset := fake.NewClientset()
-	cm.On("GetOrCreateClientset", kubeContext).Return(mockClientset, nil)
-	hm := NewInClusterHealthMonitor(cm, "")
+	hm := NewInClusterHealthMonitor(cm, false)
 	mockWorker := new(MockHealthMonitorWorker)
 	hm.worker = mockWorker
 
@@ -744,9 +707,7 @@ func TestInClusterHealthMonitor_ReadyWait_WaitSuccess(t *testing.T) {
 	// Setup
 	cm := &k8shelpersmock.MockConnectionManager{}
 	kubeContext := "test-context"
-	mockClientset := fake.NewClientset()
-	cm.On("GetOrCreateClientset", kubeContext).Return(mockClientset, nil)
-	hm := NewInClusterHealthMonitor(cm, "")
+	hm := NewInClusterHealthMonitor(cm, false)
 	mockWorker := new(MockHealthMonitorWorker)
 	hm.worker = mockWorker
 
@@ -765,9 +726,7 @@ func TestInClusterHealthMonitor_ReadyWait_WaitFailure(t *testing.T) {
 	// Setup
 	cm := &k8shelpersmock.MockConnectionManager{}
 	kubeContext := "test-context"
-	mockClientset := fake.NewClientset()
-	cm.On("GetOrCreateClientset", kubeContext).Return(mockClientset, nil)
-	hm := NewInClusterHealthMonitor(cm, "")
+	hm := NewInClusterHealthMonitor(cm, false)
 	mockWorker := new(MockHealthMonitorWorker)
 	hm.worker = mockWorker
 

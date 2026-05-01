@@ -209,8 +209,17 @@ func NewApp(cfg *config.Config) (*App, error) {
 			app.graphqlServer = graph.NewServer(cfg, app.cm)
 			protectedRoutes.Any("/graphql", gin.WrapH(app.graphqlServer))
 
-			// Cluster API proxy routes
-			protectedRoutes.Any("/cluster-api-proxy/*path", gin.WrapH(app.clusterAPIProxy))
+			// Cluster API proxy routes. When the cluster-api is not enabled
+			// (or in test mode where no real proxy is built) the route is
+			// registered with a 503 stub so callers see a clear error instead
+			// of a 404.
+			if app.clusterAPIProxy != nil {
+				protectedRoutes.Any("/cluster-api-proxy/*path", gin.WrapH(app.clusterAPIProxy))
+			} else {
+				protectedRoutes.Any("/cluster-api-proxy/*path", func(c *gin.Context) {
+					c.AbortWithStatus(http.StatusServiceUnavailable)
+				})
+			}
 
 			// Log download endpoint
 			dl := newDownloadHandlers(app)

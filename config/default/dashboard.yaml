@@ -69,13 +69,15 @@ auth-mode: auto
 #
 base-path: /
 
-## cluster-api-endpoint ##
+## cluster-api-enabled ##
 #
-# The URL of the cluster API server.
+# Whether the cluster-api is deployed in this cluster. The dashboard reaches
+# it through the kube-apiserver aggregation layer (APIService
+# v1.api.kubetail.com); no endpoint URL is needed.
 #
-# Default value: http://kubetail-cluster-api
+# Default value: true
 #
-cluster-api-endpoint: http://kubetail-cluster-api
+cluster-api-enabled: true
 
 ## environment ##
 #

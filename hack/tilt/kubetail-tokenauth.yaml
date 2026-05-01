@@ -13,10 +13,8 @@ data:
     addr: :8080
     auth-mode: token
     base-path: /
-    cluster-api-endpoint: http://kubetail-cluster-api.kubetail-system.svc:8080
+    cluster-api-enabled: true
     gin-mode: debug
-    ui:
-      cluster-api-enabled: true
     session:
       key-pairs:
         - signing-key: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
@@ -132,6 +130,9 @@ rules:
   - apiGroups: [authentication.k8s.io]
     resources: [tokenreviews]
     verbs: [create]
+  - apiGroups: [apiregistration.k8s.io]
+    resources: [apiservices]
+    verbs: [get, list, watch]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

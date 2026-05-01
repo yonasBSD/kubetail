@@ -363,12 +363,19 @@ func newInClusterProxy(kubeAPIServerEndpoint string, pathPrefix string, allowedO
 	}, nil
 }
 
-// Create new InClusterProxy. allowedOrigins is forwarded to the WebSocket
-// upgrade origin check (see httphelpers.IsAllowedOrigin).
-func NewInClusterProxy(clusterAPIEndpoint string, pathPrefix string, allowedOrigins []string) (*InClusterProxy, error) {
+// Create new InClusterProxy. The kube-apiserver endpoint is read from the
+// connection manager's REST config; the proxy rewrites incoming requests to
+// the cluster-api APIService path on the apiserver. allowedOrigins is
+// forwarded to the WebSocket upgrade origin check (see httphelpers.IsAllowedOrigin).
+func NewInClusterProxy(cm k8shelpers.ConnectionManager, pathPrefix string, allowedOrigins []string) (*InClusterProxy, error) {
+	restConfig, err := cm.GetOrCreateRestConfig("")
+	if err != nil {
+		return nil, err
+	}
+
 	rt, err := k8shelpers.NewInClusterSATRoundTripper(http.DefaultTransport)
 	if err != nil {
 		return nil, err
 	}
-	return newInClusterProxy(clusterAPIEndpoint, pathPrefix, allowedOrigins, rt)
+	return newInClusterProxy(restConfig.Host, pathPrefix, allowedOrigins, rt)
 }
