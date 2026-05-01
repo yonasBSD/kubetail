@@ -17,22 +17,22 @@
 //! gRPC metadata. Mirrors the front-proxy behavior in cluster-api's
 //! `newAggregationAuthMiddleware`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use tonic::Status;
-use tonic::metadata::{KeyRef, MetadataMap};
+use tonic::metadata::MetadataMap;
+use tonic::{Request, Status};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 pub const USER_HEADER: &str = "x-remote-user";
 pub const GROUP_HEADER: &str = "x-remote-group";
 pub const EXTRA_HEADER_PREFIX: &str = "x-remote-extra-";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Identity {
     pub user: String,
-    pub groups: Vec<String>,
-    pub extras: HashMap<String, Vec<String>>,
+    pub groups: BTreeSet<String>,
+    pub extras: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub enum AuthError {
 /// from the verified TLS chain) and the request metadata. An empty
 /// `allowed_names` accepts any CN (matches kube-apiserver's
 /// `requestheader-allowed-names` semantics).
-pub fn authenticate(
+fn authenticate(
     peer_cn: Option<&str>,
     metadata: &MetadataMap,
     allowed_names: &[String],
@@ -70,33 +70,32 @@ pub fn authenticate(
         return Err(AuthError::MissingUser);
     }
 
-    let mut groups = Vec::new();
+    let mut groups = BTreeSet::new();
     for v in metadata.get_all(GROUP_HEADER).iter() {
         let s = v
             .to_str()
             .map_err(|_| AuthError::InvalidMetadata(GROUP_HEADER.to_string()))?;
         if !s.is_empty() {
-            groups.push(s.to_string());
+            groups.insert(s.to_string());
         }
     }
 
-    let mut extras: HashMap<String, Vec<String>> = HashMap::new();
-    for key in metadata.keys() {
-        if let KeyRef::Ascii(k) = key {
-            let name = k.as_str();
-            if let Some(suffix) = name.strip_prefix(EXTRA_HEADER_PREFIX) {
-                let mut vals = Vec::new();
-                for v in metadata.get_all(name).iter() {
-                    let s = v
-                        .to_str()
-                        .map_err(|_| AuthError::InvalidMetadata(name.to_string()))?;
-                    vals.push(s.to_string());
-                }
-                if !vals.is_empty() {
-                    extras.insert(suffix.to_string(), vals);
-                }
-            }
-        }
+    let mut extras: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for key_value in metadata.iter() {
+        let tonic::metadata::KeyAndValueRef::Ascii(k, v) = key_value else {
+            continue;
+        };
+        let name = k.as_str();
+        let Some(suffix) = name.strip_prefix(EXTRA_HEADER_PREFIX) else {
+            continue;
+        };
+        let s = v
+            .to_str()
+            .map_err(|_| AuthError::InvalidMetadata(name.to_string()))?;
+        extras
+            .entry(suffix.to_string())
+            .or_default()
+            .insert(s.to_string());
     }
 
     Ok(Identity {
@@ -116,7 +115,6 @@ pub fn cn_from_cert_der(der: &[u8]) -> Option<String> {
         .and_then(|cn| cn.as_str().ok().map(str::to_owned))
 }
 
-/// Translate an `AuthError` into a `tonic::Status`.
 fn auth_error_to_status(err: &AuthError) -> Status {
     match err {
         AuthError::MissingPeerCert | AuthError::MissingUser => {
@@ -130,7 +128,7 @@ fn auth_error_to_status(err: &AuthError) -> Status {
 /// Authenticate a request given the verified peer-cert chain (TLS layer has
 /// already chained it to the trusted CA) and the request metadata. Returns a
 /// gRPC `Status` on rejection.
-pub fn check(
+fn check(
     peer_certs: Option<&[impl AsRef<[u8]>]>,
     metadata: &MetadataMap,
     allowed_names: &[String],
@@ -145,8 +143,8 @@ pub fn check(
 /// and stashes the resulting `Identity` on request extensions.
 pub fn interceptor(
     allowed_names: Arc<Vec<String>>,
-) -> impl FnMut(tonic::Request<()>) -> Result<tonic::Request<()>, Status> + Clone {
-    move |mut req: tonic::Request<()>| {
+) -> impl FnMut(Request<()>) -> Result<Request<()>, Status> + Clone {
+    move |mut req: Request<()>| {
         let certs = req.peer_certs();
         let id = check(
             certs.as_deref().map(|v| v.as_slice()),
@@ -156,6 +154,15 @@ pub fn interceptor(
         req.extensions_mut().insert(id);
         Ok(req)
     }
+}
+
+/// Pull the `Identity` stashed on the request by [`interceptor`], or reject
+/// the request with `Unauthenticated` if it's missing.
+pub fn identity_from<T>(req: &Request<T>) -> Result<Identity, Status> {
+    req.extensions()
+        .get::<Identity>()
+        .cloned()
+        .ok_or_else(|| Status::unauthenticated("identity not present on request"))
 }
 
 #[cfg(test)]
@@ -235,7 +242,10 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(id.groups, vec!["system:authenticated", "devs"]);
+        assert_eq!(
+            id.groups,
+            BTreeSet::from(["system:authenticated".to_string(), "devs".to_string()])
+        );
     }
 
     #[test]
@@ -253,9 +263,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             id.extras.get("scopes").unwrap(),
-            &vec!["read".to_string(), "write".to_string()]
+            &BTreeSet::from(["read".to_string(), "write".to_string()])
         );
-        assert_eq!(id.extras.get("tenant").unwrap(), &vec!["acme".to_string()]);
+        assert_eq!(
+            id.extras.get("tenant").unwrap(),
+            &BTreeSet::from(["acme".to_string()])
+        );
         assert_eq!(id.extras.len(), 2);
     }
 
@@ -301,7 +314,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(id.user, "alice");
-        assert_eq!(id.groups, vec!["devs"]);
+        assert_eq!(id.groups, BTreeSet::from(["devs".to_string()]));
     }
 
     #[test]

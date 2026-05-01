@@ -86,7 +86,7 @@ impl LogRecordsService for LogRecordsImpl {
         &self,
         request: Request<LogRecordsStreamRequest>,
     ) -> Result<Response<Self::StreamBackwardStream>, Status> {
-        let request_metadata = request.metadata().clone();
+        let identity = crate::auth::identity_from(&request)?;
         let request = request.into_inner();
         let file_path = self.get_log_filename(&request)?;
         let (tx, rx) = mpsc::channel(100);
@@ -94,7 +94,7 @@ impl LogRecordsService for LogRecordsImpl {
 
         let namespaces = vec![request.namespace.clone()];
         self.authorizer
-            .is_authorized(&request_metadata, &namespaces, "get")
+            .is_authorized(&identity, &namespaces, "get")
             .await?;
 
         self.task_tracker.spawn(async move {
@@ -121,7 +121,7 @@ impl LogRecordsService for LogRecordsImpl {
         &self,
         request: Request<LogRecordsStreamRequest>,
     ) -> Result<Response<Self::StreamForwardStream>, Status> {
-        let request_metadata = request.metadata().clone();
+        let identity = crate::auth::identity_from(&request)?;
         let request = request.into_inner();
         let file_path = self.get_log_filename(&request)?;
 
@@ -130,7 +130,7 @@ impl LogRecordsService for LogRecordsImpl {
 
         let namespaces = vec![request.namespace.clone()];
         self.authorizer
-            .is_authorized(&request_metadata, &namespaces, "get")
+            .is_authorized(&identity, &namespaces, "get")
             .await?;
 
         self.task_tracker.spawn(async move {

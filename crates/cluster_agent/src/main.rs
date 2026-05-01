@@ -16,6 +16,7 @@ use std::error::Error;
 use std::fs::read_to_string;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use clap::{ArgAction, arg, command, value_parser};
 use tokio::signal::ctrl_c;
@@ -28,7 +29,6 @@ use types::cluster_agent::FILE_DESCRIPTOR_SET;
 use types::cluster_agent::log_metadata_service_server::LogMetadataServiceServer;
 use types::cluster_agent::log_records_service_server::LogRecordsServiceServer;
 
-#[allow(dead_code)] // wired in trust-chain interceptor cycle
 mod auth;
 mod authorizer;
 mod config;
@@ -59,21 +59,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     info!("Starting cluster-agent on {}", config.address);
 
+    let allowed_names = Arc::new(config.tls.allowed_names.clone());
+    let log_metadata_svc = LogMetadataServiceServer::with_interceptor(
+        LogMetadataImpl::new(
+            root_ctx.clone(),
+            task_tracker.clone(),
+            config.logs_dir.clone(),
+            authorizer.clone(),
+        ),
+        auth::interceptor(allowed_names.clone()),
+    );
+    let log_records_svc = LogRecordsServiceServer::with_interceptor(
+        LogRecordsImpl::new(
+            root_ctx.clone(),
+            task_tracker.clone(),
+            config.logs_dir.clone(),
+            authorizer.clone(),
+        ),
+        auth::interceptor(allowed_names.clone()),
+    );
+
     server
         .add_service(agent_health_service)
         .add_service(reflection_service)
-        .add_service(LogMetadataServiceServer::new(LogMetadataImpl::new(
-            root_ctx.clone(),
-            task_tracker.clone(),
-            config.logs_dir.clone(),
-            authorizer.clone(),
-        )))
-        .add_service(LogRecordsServiceServer::new(LogRecordsImpl::new(
-            root_ctx.clone(),
-            task_tracker.clone(),
-            config.logs_dir.clone(),
-            authorizer.clone(),
-        )))
+        .add_service(log_metadata_svc)
+        .add_service(log_records_svc)
         .serve_with_shutdown(config.address, shutdown(root_ctx))
         .await?;
 

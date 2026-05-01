@@ -66,7 +66,6 @@ pub struct TlsConfig {
     pub client_auth: Option<String>,
 
     #[serde(rename(deserialize = "allowed-names"), default)]
-    #[allow(dead_code)] // wired in trust-chain interceptor cycle
     pub allowed_names: Vec<String>,
 }
 
