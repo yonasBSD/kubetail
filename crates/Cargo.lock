@@ -375,6 +375,7 @@ dependencies = [
  "rgkl",
  "secrecy",
  "serde",
+ "serde_json",
  "serial_test",
  "subst",
  "tempfile",

@@ -16,6 +16,7 @@ package grpchelpers
 
 import (
 	"context"
+	"encoding/json"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -24,20 +25,30 @@ import (
 )
 
 const (
-	userHeader        = "x-remote-user"
-	groupHeader       = "x-remote-group"
-	extraHeaderPrefix = "x-remote-extra-"
+	userHeader   = "x-remote-user"
+	groupHeader  = "x-remote-group"
+	extrasHeader = "x-remote-extras"
 )
 
+// withImpersonateMetadata pulls the *ImpersonateInfo off the context (if any)
+// and appends it as outgoing gRPC metadata. Extras ride in a single
+// JSON-encoded header because gRPC metadata keys are restricted to
+// `[0-9a-z-_.]`, which can't carry URL-encoded sub-keys like
+// `authentication.kubernetes.io%2fcredential-id` that kube-apiserver forwards.
 func withImpersonateMetadata(ctx context.Context) context.Context {
 	info, _ := ctx.Value(k8shelpers.K8SImpersonateCtxKey).(*k8shelpers.ImpersonateInfo)
 	if info == nil || info.User == "" {
 		return ctx
 	}
-	var kv []string
-	info.ForEach(userHeader, groupHeader, extraHeaderPrefix, func(k, v string) {
-		kv = append(kv, k, v)
-	})
+	kv := []string{userHeader, info.User}
+	for _, g := range info.Groups {
+		kv = append(kv, groupHeader, g)
+	}
+	if len(info.Extras) > 0 {
+		if b, err := json.Marshal(info.Extras); err == nil {
+			kv = append(kv, extrasHeader, string(b))
+		}
+	}
 	return metadata.AppendToOutgoingContext(ctx, kv...)
 }
 

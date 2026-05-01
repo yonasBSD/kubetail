@@ -17,7 +17,7 @@
 //! gRPC metadata. Mirrors the front-proxy behavior in cluster-api's
 //! `newAggregationAuthMiddleware`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use tonic::metadata::MetadataMap;
@@ -26,7 +26,11 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 
 pub const USER_HEADER: &str = "x-remote-user";
 pub const GROUP_HEADER: &str = "x-remote-group";
-pub const EXTRA_HEADER_PREFIX: &str = "x-remote-extra-";
+/// Single header carrying a JSON-encoded `map[string][]string` of impersonation
+/// extras. Single-header transport sidesteps gRPC's metadata key restriction
+/// (`[0-9a-z-_.]`), which can't carry URL-encoded sub-keys like
+/// `authentication.kubernetes.io%2fcredential-id`.
+pub const EXTRAS_HEADER: &str = "x-remote-extras";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Identity {
@@ -81,21 +85,18 @@ fn authenticate(
     }
 
     let mut extras: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for key_value in metadata.iter() {
-        let tonic::metadata::KeyAndValueRef::Ascii(k, v) = key_value else {
-            continue;
-        };
-        let name = k.as_str();
-        let Some(suffix) = name.strip_prefix(EXTRA_HEADER_PREFIX) else {
-            continue;
-        };
+    if let Some(v) = metadata.get(EXTRAS_HEADER) {
         let s = v
             .to_str()
-            .map_err(|_| AuthError::InvalidMetadata(name.to_string()))?;
-        extras
-            .entry(suffix.to_string())
-            .or_default()
-            .insert(s.to_string());
+            .map_err(|_| AuthError::InvalidMetadata(EXTRAS_HEADER.to_string()))?;
+        let parsed: HashMap<String, Vec<String>> = serde_json::from_str(s)
+            .map_err(|_| AuthError::InvalidMetadata(EXTRAS_HEADER.to_string()))?;
+        for (k, vals) in parsed {
+            let set: BTreeSet<String> = vals.into_iter().collect();
+            if !set.is_empty() {
+                extras.insert(k, set);
+            }
+        }
     }
 
     Ok(Identity {
@@ -249,14 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn extras_grouped_by_suffix() {
+    fn extras_parsed_from_json_header() {
         let id = authenticate(
             Some("cn"),
             &md(&[
                 ("x-remote-user", "alice"),
-                ("x-remote-extra-scopes", "read"),
-                ("x-remote-extra-scopes", "write"),
-                ("x-remote-extra-tenant", "acme"),
+                (
+                    "x-remote-extras",
+                    r#"{"scopes":["read","write"],"authentication.kubernetes.io/credential-id":["abc"]}"#,
+                ),
             ]),
             &[],
         )
@@ -266,10 +268,23 @@ mod tests {
             &BTreeSet::from(["read".to_string(), "write".to_string()])
         );
         assert_eq!(
-            id.extras.get("tenant").unwrap(),
-            &BTreeSet::from(["acme".to_string()])
+            id.extras
+                .get("authentication.kubernetes.io/credential-id")
+                .unwrap(),
+            &BTreeSet::from(["abc".to_string()])
         );
         assert_eq!(id.extras.len(), 2);
+    }
+
+    #[test]
+    fn malformed_extras_json_rejected() {
+        let err = authenticate(
+            Some("cn"),
+            &md(&[("x-remote-user", "alice"), ("x-remote-extras", "not-json")]),
+            &[],
+        )
+        .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidMetadata(_)));
     }
 
     #[test]

@@ -16,6 +16,7 @@ package grpchelpers
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,13 +41,13 @@ func TestImpersonateUnaryClientInterceptor(t *testing.T) {
 		assert.Empty(t, md.Get("x-remote-group"))
 	})
 
-	t.Run("forwards user, groups, extras as repeated metadata", func(t *testing.T) {
+	t.Run("forwards user and groups; extras as JSON in single header", func(t *testing.T) {
 		info := &k8shelpers.ImpersonateInfo{
 			User:   "alice",
 			Groups: []string{"system:authenticated", "devs"},
 			Extras: map[string][]string{
 				"scopes": {"read", "write"},
-				"tenant": {"acme"},
+				"authentication.kubernetes.io/credential-id": {"abc"},
 			},
 		}
 		ctx := context.WithValue(context.Background(), k8shelpers.K8SImpersonateCtxKey, info)
@@ -63,8 +64,12 @@ func TestImpersonateUnaryClientInterceptor(t *testing.T) {
 		assert.True(t, ok)
 		assert.Equal(t, []string{"alice"}, md.Get("x-remote-user"))
 		assert.ElementsMatch(t, []string{"system:authenticated", "devs"}, md.Get("x-remote-group"))
-		assert.ElementsMatch(t, []string{"read", "write"}, md.Get("x-remote-extra-scopes"))
-		assert.Equal(t, []string{"acme"}, md.Get("x-remote-extra-tenant"))
+
+		extrasJSON := md.Get("x-remote-extras")
+		assert.Len(t, extrasJSON, 1)
+		var got map[string][]string
+		assert.NoError(t, json.Unmarshal([]byte(extrasJSON[0]), &got))
+		assert.Equal(t, info.Extras, got)
 	})
 
 	t.Run("user only, no groups, no extras", func(t *testing.T) {
