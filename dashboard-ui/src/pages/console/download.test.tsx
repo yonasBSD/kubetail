@@ -82,7 +82,7 @@ describe('getDownloadActionURL', () => {
     ).toBe('/cluster-api-proxy/api/v1/download');
   });
 
-  it('appends kubeContext/namespace/service segments in desktop mode', () => {
+  it('appends kubeContext segment in desktop mode', () => {
     expect(
       getDownloadActionURL({
         basename: '/',
@@ -90,7 +90,7 @@ describe('getDownloadActionURL', () => {
         shouldUseClusterAPI: true,
         kubeContext: 'ctx-1',
       }),
-    ).toBe('/cluster-api-proxy/ctx-1/kubetail-system/kubetail-cluster-api/api/v1/download');
+    ).toBe('/cluster-api-proxy/ctx-1/api/v1/download');
   });
 
   it('honors a non-root basename', () => {

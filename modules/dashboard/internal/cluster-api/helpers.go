@@ -24,6 +24,10 @@ import (
 const DefaultNamespace = "kubetail-system"
 const DefaultServiceName = "kubetail-cluster-api"
 
+// APIServicePath is the kube-apiserver path the cluster-api is registered at
+// via the v1.api.kubetail.com APIService. Both proxy paths rewrite into it.
+const APIServicePath = "/apis/api.kubetail.com/v1"
+
 // Represents connect args
 type connectArgs struct {
 	Namespace   string

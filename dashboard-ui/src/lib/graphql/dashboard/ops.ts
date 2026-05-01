@@ -436,33 +436,8 @@ export const HOME_STATEFULSETS_LIST_WATCH = gql(`
  */
 
 export const CLUSTER_API_READY_WAIT = gql(`
-  subscription ClusterAPIReadyWait($kubeContext: String!, $namespace: String!, $serviceName: String!) {
-    clusterAPIReadyWait(kubeContext: $kubeContext, namespace: $namespace, serviceName: $serviceName)
-  }
-`);
-
-export const CLUSTER_API_SERVICES_LIST_FETCH = gql(`
-  query ClusterAPIServicesListFetch($kubeContext: String, $continue: String = "") {
-    clusterAPIServicesList(kubeContext: $kubeContext, options: { limit: "50", continue: $continue }) {
-      metadata {
-        continue
-        resourceVersion
-      }
-      items {
-        ...ClusterAPIServicesListItemFragment
-      }
-    }
-  }
-`);
-
-export const CLUSTER_API_SERVICES_LIST_WATCH = gql(`
-  subscription ClusterAPIServicesListWatch($kubeContext: String, $resourceVersion: String = "") {
-    clusterAPIServicesWatch(kubeContext: $kubeContext, options: { resourceVersion: $resourceVersion }) {
-      type
-      object {
-        ...ClusterAPIServicesListItemFragment
-      }
-    }    
+  subscription ClusterAPIReadyWait($kubeContext: String!) {
+    clusterAPIReadyWait(kubeContext: $kubeContext)
   }
 `);
 
@@ -598,16 +573,16 @@ export const SERVER_STATUS_KUBERNETES_API_HEALTHZ_WATCH = gql(`
 `);
 
 export const SERVER_STATUS_CLUSTER_API_HEALTHZ_GET = gql(`
-  query ServerStatusClusterAPIHealthzGet($kubeContext: String!, $namespace: String, $serviceName: String) {
-    clusterAPIHealthzGet(kubeContext: $kubeContext, namespace: $namespace, serviceName: $serviceName) {
+  query ServerStatusClusterAPIHealthzGet($kubeContext: String!) {
+    clusterAPIHealthzGet(kubeContext: $kubeContext) {
       ...HealthCheckResponseFragment
     }
   }
 `);
 
 export const SERVER_STATUS_CLUSTER_API_HEALTHZ_WATCH = gql(`
-  subscription ServerStatusClusterAPIHealthzWatch($kubeContext: String!, $namespace: String, $serviceName: String) {
-    clusterAPIHealthzWatch(kubeContext: $kubeContext, namespace: $namespace, serviceName: $serviceName) {
+  subscription ServerStatusClusterAPIHealthzWatch($kubeContext: String!) {
+    clusterAPIHealthzWatch(kubeContext: $kubeContext) {
       ...HealthCheckResponseFragment
     }
   }

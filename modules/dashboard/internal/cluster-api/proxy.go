@@ -66,8 +66,8 @@ func (w *hijackTrackingResponseWriter) closeConn() {
 	}
 }
 
-// For parsing paths of the form /:kubeContext/:namespace/:serviceName/*relPath
-var desktopProxyPathRegex = regexp.MustCompile(`^/([^/]+)/([^/]+)/([^/]+)/(.*)$`)
+// For parsing paths of the form /:kubeContext/*relPath
+var desktopProxyPathRegex = regexp.MustCompile(`^/([^/]+)/(.*)$`)
 
 // For parsing cookie paths
 var cookiepathRegex = regexp.MustCompile(`Path=[^;]*`)
@@ -115,11 +115,7 @@ func (p *DesktopProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("did not understand url: %s", origPath), http.StatusInternalServerError)
 		return
 	}
-	// namespace and serviceName remain in the URL for compatibility with
-	// existing frontend routes but are no longer meaningful — the cluster-api
-	// is reached via the kube-apiserver aggregation layer, which doesn't care
-	// where the backing Service lives.
-	kubeContext, _, _, relPath := matches[1], matches[2], matches[3], matches[4]
+	kubeContext, relPath := matches[1], matches[2]
 
 	// Get Kubernetes proxy handler. The handler authenticates against
 	// kube-apiserver using whatever credentials the kubeconfig supplies
@@ -133,7 +129,7 @@ func (p *DesktopProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Rewrite to the cluster-api's APIService path.
 	u := *r.URL
-	u.Path = path.Join("/apis/api.kubetail.com/v1", relPath)
+	u.Path = path.Join(APIServicePath, relPath)
 	r.URL = &u
 
 	// Strip the browser-supplied Origin so the cluster-api can treat its
@@ -320,7 +316,7 @@ func newInClusterProxy(kubeAPIServerEndpoint string, pathPrefix string, allowedO
 			// Rewrite to the cluster-api APIService path on the apiserver.
 			rel := strings.TrimPrefix(r.URL.Path, pathPrefix)
 			targetUrl := endpointUrl
-			targetUrl.Path = path.Join("/apis/api.kubetail.com/v1", rel)
+			targetUrl.Path = path.Join(APIServicePath, rel)
 			r.URL = targetUrl
 
 			// Drop client-supplied auth headers so a malicious upstream

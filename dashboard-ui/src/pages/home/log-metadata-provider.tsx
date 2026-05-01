@@ -21,7 +21,6 @@ import { CLUSTER_API_READY_WAIT } from '@/lib/graphql/dashboard/ops';
 import { LOG_METADATA_LIST_FETCH, LOG_METADATA_LIST_WATCH } from '@/lib/graphql/cluster-api/ops';
 import type { LogMetadataListFetchQuery, LogMetadataWatchEvent } from '@/lib/graphql/cluster-api/__generated__/graphql';
 import { useIsClusterAPIEnabled } from '@/lib/hooks';
-import { CLUSTER_API_PROXY_NAMESPACE, CLUSTER_API_PROXY_SERVICE } from '@/lib/util';
 
 import type { FileInfo, KubeContext } from './shared';
 import { logMetadataMapAtomFamily } from './state';
@@ -41,24 +40,16 @@ export const LogMetadataProvider = ({ kubeContext }: LogMetadataProviderProps) =
 
   const isClusterAPIEnabled = useIsClusterAPIEnabled(kubeContext);
   const isEnabled = isClusterAPIEnabled && kubeContext !== null;
-
-  const connectArgs = useMemo(
-    () => ({
-      kubeContext: kubeContext || '',
-      namespace: CLUSTER_API_PROXY_NAMESPACE,
-      serviceName: CLUSTER_API_PROXY_SERVICE,
-    }),
-    [kubeContext],
-  );
+  const kubeContextStr = kubeContext || '';
 
   const readyWait = useSubscription(CLUSTER_API_READY_WAIT, {
     skip: !isEnabled,
-    variables: connectArgs,
+    variables: { kubeContext: kubeContextStr },
   });
 
   const isReady = readyWait.data?.clusterAPIReadyWait ?? false;
 
-  const client = useMemo(() => getClusterAPIClient(connectArgs), [connectArgs]);
+  const client = useMemo(() => getClusterAPIClient(kubeContextStr), [kubeContextStr]);
 
   // Initial query
   const { loading, error, data, subscribeToMore, startPolling, stopPolling } = useQuery(LOG_METADATA_LIST_FETCH, {

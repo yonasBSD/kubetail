@@ -282,7 +282,6 @@ export class DashboardCustomCache extends InMemoryCache {
             appsV1StatefulSetsList: k8sPagination(),
             batchV1CronJobsList: k8sPagination(),
             batchV1JobsList: k8sPagination(),
-            clusterAPIServicesList: k8sPagination(),
             coreV1NamespacesList: k8sPagination(),
             coreV1PodsList: k8sPagination(),
             podLogQuery: {
@@ -316,12 +315,6 @@ export const dashboardClient = new ApolloClient({
  * Cluster API client
  */
 
-type ClusterAPIContext = {
-  kubeContext: string;
-  namespace: string;
-  serviceName: string;
-};
-
 const clusterAPIClientCache = new Map<string, ApolloClient>();
 
 export class ClusterAPICustomCache extends InMemoryCache {
@@ -339,34 +332,25 @@ export class ClusterAPICustomCache extends InMemoryCache {
   }
 }
 
-export const getClusterAPIClient = (context: ClusterAPIContext) => {
-  // Build cache key
-  let k = context.kubeContext;
-  if (appConfig.environment === 'desktop') {
-    k += `::${context.namespace}::${context.serviceName}`;
-  }
-
-  // Check cache
-  let client = clusterAPIClientCache.get(k);
+export const getClusterAPIClient = (kubeContext: string) => {
+  let client = clusterAPIClientCache.get(kubeContext);
 
   if (!client) {
     const basepath = clusterAPIProxyPath({
       basename,
       environment: appConfig.environment,
-      kubeContext: context.kubeContext,
+      kubeContext,
     });
 
     const { link } = createLink(basepath);
 
-    // Init new client
     client = new ApolloClient({
       cache: new ClusterAPICustomCache(),
       link,
       queryDeduplication: false,
     });
 
-    // Add to cache
-    clusterAPIClientCache.set(k, client);
+    clusterAPIClientCache.set(kubeContext, client);
   }
 
   return client;

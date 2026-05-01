@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/utils/ptr"
 )
 
 // MockHealthMonitorWorker is a testify-based mock implementation of the healthMonitorWorker interface
@@ -251,8 +250,6 @@ func TestDesktopHealthMonitor_GetHealthStatus(t *testing.T) {
 	tests := []struct {
 		name           string
 		kubeContext    string
-		namespace      *string
-		serviceName    *string
 		mockStatus     HealthStatus
 		setupMockError bool
 		expectedStatus HealthStatus
@@ -261,8 +258,6 @@ func TestDesktopHealthMonitor_GetHealthStatus(t *testing.T) {
 		{
 			name:           "Successful status retrieval - SUCCESS",
 			kubeContext:    "test-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusSuccess,
 			setupMockError: false,
 			expectedStatus: HealthStatusSuccess,
@@ -271,8 +266,6 @@ func TestDesktopHealthMonitor_GetHealthStatus(t *testing.T) {
 		{
 			name:           "Successful status retrieval - FAILURE",
 			kubeContext:    "test-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusFailure,
 			setupMockError: false,
 			expectedStatus: HealthStatusFailure,
@@ -281,8 +274,6 @@ func TestDesktopHealthMonitor_GetHealthStatus(t *testing.T) {
 		{
 			name:           "Successful status retrieval - PENDING",
 			kubeContext:    "test-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusPending,
 			setupMockError: false,
 			expectedStatus: HealthStatusPending,
@@ -291,8 +282,6 @@ func TestDesktopHealthMonitor_GetHealthStatus(t *testing.T) {
 		{
 			name:           "Successful status retrieval - NOTFOUND",
 			kubeContext:    "test-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusNotFound,
 			setupMockError: false,
 			expectedStatus: HealthStatusNotFound,
@@ -301,22 +290,10 @@ func TestDesktopHealthMonitor_GetHealthStatus(t *testing.T) {
 		{
 			name:           "Worker creation error",
 			kubeContext:    "invalid-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusUknown,
 			setupMockError: true,
 			expectedStatus: HealthStatusUknown,
 			expectError:    true,
-		},
-		{
-			name:           "Default namespace and service name",
-			kubeContext:    "test-context",
-			namespace:      nil,
-			serviceName:    nil,
-			mockStatus:     HealthStatusSuccess,
-			setupMockError: false,
-			expectedStatus: HealthStatusSuccess,
-			expectError:    false,
 		},
 	}
 
@@ -335,18 +312,14 @@ func TestDesktopHealthMonitor_GetHealthStatus(t *testing.T) {
 			hm := NewDesktopHealthMonitor(cm)
 
 			if !tt.setupMockError {
-				namespace := ptr.Deref(tt.namespace, DefaultNamespace)
-				serviceName := ptr.Deref(tt.serviceName, DefaultServiceName)
-				cacheKey := fmt.Sprintf("%s::%s::%s", tt.kubeContext, namespace, serviceName)
-
 				mockWorker := new(MockHealthMonitorWorker)
 				mockWorker.On("GetHealthStatus").Return(tt.mockStatus)
-				hm.workerCache.Store(cacheKey, mockWorker)
+				hm.workerCache.Store(tt.kubeContext, mockWorker)
 			}
 
 			// Call GetHealthStatus
 			ctx := context.Background()
-			status, err := hm.GetHealthStatus(ctx, tt.kubeContext, tt.namespace, tt.serviceName)
+			status, err := hm.GetHealthStatus(ctx, tt.kubeContext)
 
 			// Assert results
 			if tt.expectError {
@@ -417,7 +390,7 @@ func TestInClusterHealthMonitor_GetHealthStatus(t *testing.T) {
 
 			// Call GetHealthStatus
 			ctx := context.Background()
-			status, err := hm.GetHealthStatus(ctx, "", nil, nil)
+			status, err := hm.GetHealthStatus(ctx, "")
 
 			// Assert results
 			if tt.expectError {
@@ -438,8 +411,6 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 	tests := []struct {
 		name           string
 		kubeContext    string
-		namespace      *string
-		serviceName    *string
 		mockStatus     HealthStatus
 		setupMockError bool
 		expectedStatus HealthStatus
@@ -448,8 +419,6 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 		{
 			name:           "Successful status retrieval - SUCCESS",
 			kubeContext:    "test-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusSuccess,
 			setupMockError: false,
 			expectedStatus: HealthStatusSuccess,
@@ -458,8 +427,6 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 		{
 			name:           "Successful status retrieval - FAILURE",
 			kubeContext:    "test-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusFailure,
 			setupMockError: false,
 			expectedStatus: HealthStatusFailure,
@@ -468,8 +435,6 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 		{
 			name:           "Successful status retrieval - PENDING",
 			kubeContext:    "test-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusPending,
 			setupMockError: false,
 			expectedStatus: HealthStatusPending,
@@ -478,8 +443,6 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 		{
 			name:           "Successful status retrieval - NOTFOUND",
 			kubeContext:    "test-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusNotFound,
 			setupMockError: false,
 			expectedStatus: HealthStatusNotFound,
@@ -488,22 +451,10 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 		{
 			name:           "Worker creation error",
 			kubeContext:    "invalid-context",
-			namespace:      ptr.To("test-namespace"),
-			serviceName:    ptr.To("test-service"),
 			mockStatus:     HealthStatusUknown,
 			setupMockError: true,
 			expectedStatus: HealthStatusUknown,
 			expectError:    true,
-		},
-		{
-			name:           "Default namespace and service name",
-			kubeContext:    "test-context",
-			namespace:      nil,
-			serviceName:    nil,
-			mockStatus:     HealthStatusSuccess,
-			setupMockError: false,
-			expectedStatus: HealthStatusSuccess,
-			expectError:    false,
 		},
 	}
 
@@ -522,18 +473,14 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 			hm := NewDesktopHealthMonitor(cm)
 
 			if !tt.setupMockError {
-				namespace := ptr.Deref(tt.namespace, DefaultNamespace)
-				serviceName := ptr.Deref(tt.serviceName, DefaultServiceName)
-				cacheKey := fmt.Sprintf("%s::%s::%s", tt.kubeContext, namespace, serviceName)
-
 				mockWorker := new(MockHealthMonitorWorker)
 				ctx := context.Background()
 				statusCh := createMockStatusChannel(tt.mockStatus)
 				mockWorker.On("WatchHealthStatus", ctx).Return(statusCh, nil)
-				hm.workerCache.Store(cacheKey, mockWorker)
+				hm.workerCache.Store(tt.kubeContext, mockWorker)
 
 				// Action
-				status, err := hm.WatchHealthStatus(ctx, tt.kubeContext, tt.namespace, tt.serviceName)
+				status, err := hm.WatchHealthStatus(ctx, tt.kubeContext)
 
 				// Assert
 				assert.NoError(t, err)
@@ -543,7 +490,7 @@ func TestDesktopHealthMonitor_WatchHealthStatus(t *testing.T) {
 			} else {
 				// Action for error case
 				ctx := context.Background()
-				_, err := hm.WatchHealthStatus(ctx, tt.kubeContext, tt.namespace, tt.serviceName)
+				_, err := hm.WatchHealthStatus(ctx, tt.kubeContext)
 
 				// Assert
 				assert.Error(t, err)
@@ -561,8 +508,7 @@ func TestDesktopHealthMonitor_WatchHealthStatus_ContextCancellation(t *testing.T
 
 	hm := NewDesktopHealthMonitor(cm)
 	mockWorker := new(MockHealthMonitorWorker)
-	cacheKey := fmt.Sprintf("%s::%s::%s", kubeContext, DefaultNamespace, DefaultServiceName)
-	hm.workerCache.Store(cacheKey, mockWorker)
+	hm.workerCache.Store(kubeContext, mockWorker)
 
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -571,7 +517,7 @@ func TestDesktopHealthMonitor_WatchHealthStatus_ContextCancellation(t *testing.T
 	statusCh := createMockStatusChannelWithContext(ctx, HealthStatusSuccess)
 	mockWorker.On("WatchHealthStatus", mock.Anything).Return(statusCh, nil)
 
-	watchCh, err := hm.WatchHealthStatus(ctx, kubeContext, nil, nil)
+	watchCh, err := hm.WatchHealthStatus(ctx, kubeContext)
 	assert.NoError(t, err)
 
 	// Receive initial status
@@ -645,7 +591,7 @@ func TestInClusterHealthMonitor_WatchHealthStatus(t *testing.T) {
 			statusCh := createMockStatusChannel(tt.mockStatus)
 			mockWorker.On("WatchHealthStatus", ctx).Return(statusCh, nil)
 
-			status, err := hm.WatchHealthStatus(ctx, "", nil, nil)
+			status, err := hm.WatchHealthStatus(ctx, "")
 
 			// Assert
 			assert.NoError(t, err)
@@ -674,7 +620,7 @@ func TestInClusterHealthMonitor_WatchHealthStatus_ContextCancellation(t *testing
 	statusCh := createMockStatusChannelWithContext(ctx, HealthStatusSuccess)
 	mockWorker.On("WatchHealthStatus", mock.Anything).Return(statusCh, nil)
 
-	watchCh, err := hm.WatchHealthStatus(ctx, "", nil, nil)
+	watchCh, err := hm.WatchHealthStatus(ctx, "")
 	assert.NoError(t, err)
 
 	// Receive initial status
@@ -711,14 +657,13 @@ func TestDesktopHealthMonitor_ReadyWait_Immediate_Success(t *testing.T) {
 
 	hm := NewDesktopHealthMonitor(cm)
 	mockWorker := new(MockHealthMonitorWorker)
-	cacheKey := fmt.Sprintf("%s::%s::%s", kubeContext, DefaultNamespace, DefaultServiceName)
-	hm.workerCache.Store(cacheKey, mockWorker)
+	hm.workerCache.Store(kubeContext, mockWorker)
 
 	ctx := context.Background()
 	mockWorker.On("ReadyWait", ctx).Return(nil)
 
 	// Action
-	err := hm.ReadyWait(ctx, kubeContext, nil, nil)
+	err := hm.ReadyWait(ctx, kubeContext)
 
 	// Assert
 	assert.NoError(t, err)
@@ -734,14 +679,13 @@ func TestDesktopHealthMonitor_ReadyWait_WaitSuccess(t *testing.T) {
 
 	hm := NewDesktopHealthMonitor(cm)
 	mockWorker := new(MockHealthMonitorWorker)
-	cacheKey := fmt.Sprintf("%s::%s::%s", kubeContext, DefaultNamespace, DefaultServiceName)
-	hm.workerCache.Store(cacheKey, mockWorker)
+	hm.workerCache.Store(kubeContext, mockWorker)
 
 	ctx := context.Background()
 	mockWorker.On("ReadyWait", ctx).Return(nil)
 
 	// Call the health monitor's ReadyWait
-	err := hm.ReadyWait(ctx, kubeContext, nil, nil)
+	err := hm.ReadyWait(ctx, kubeContext)
 
 	// Assert
 	assert.NoError(t, err)
@@ -757,8 +701,7 @@ func TestDesktopHealthMonitor_ReadyWait_WaitFailure(t *testing.T) {
 
 	hm := NewDesktopHealthMonitor(cm)
 	mockWorker := new(MockHealthMonitorWorker)
-	cacheKey := fmt.Sprintf("%s::%s::%s", kubeContext, DefaultNamespace, DefaultServiceName)
-	hm.workerCache.Store(cacheKey, mockWorker)
+	hm.workerCache.Store(kubeContext, mockWorker)
 
 	// Action
 	ctx := context.Background()
@@ -769,7 +712,7 @@ func TestDesktopHealthMonitor_ReadyWait_WaitFailure(t *testing.T) {
 	mockWorker.On("ReadyWait", ctx).Return(expectedErr)
 
 	// Call the health monitor's ReadyWait
-	err := hm.ReadyWait(ctx, kubeContext, nil, nil)
+	err := hm.ReadyWait(ctx, kubeContext)
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "context deadline exceeded")
@@ -790,7 +733,7 @@ func TestInClusterHealthMonitor_ReadyWait_ImmediateSuccess(t *testing.T) {
 	mockWorker.On("ReadyWait", ctx).Return(nil)
 
 	// Action
-	err := hm.ReadyWait(ctx, kubeContext, nil, nil)
+	err := hm.ReadyWait(ctx, kubeContext)
 
 	// Assert
 	assert.NoError(t, err)
@@ -811,7 +754,7 @@ func TestInClusterHealthMonitor_ReadyWait_WaitSuccess(t *testing.T) {
 	mockWorker.On("ReadyWait", ctx).Return(nil)
 
 	// Action
-	err := hm.ReadyWait(ctx, kubeContext, nil, nil)
+	err := hm.ReadyWait(ctx, kubeContext)
 
 	// Assert
 	assert.NoError(t, err)
@@ -837,7 +780,7 @@ func TestInClusterHealthMonitor_ReadyWait_WaitFailure(t *testing.T) {
 	mockWorker.On("ReadyWait", ctx).Return(expectedErr)
 
 	// Call the health monitor's ReadyWait
-	err := hm.ReadyWait(ctx, kubeContext, nil, nil)
+	err := hm.ReadyWait(ctx, kubeContext)
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "context deadline exceeded")

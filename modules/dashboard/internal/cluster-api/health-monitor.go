@@ -49,9 +49,9 @@ const (
 // Represents HealthMonitor
 type HealthMonitor interface {
 	Shutdown()
-	GetHealthStatus(ctx context.Context, kubeContext string, namespacePtr *string, serviceNamePtr *string) (HealthStatus, error)
-	WatchHealthStatus(ctx context.Context, kubeContext string, namespacePtr *string, serviceNamePtr *string) (<-chan HealthStatus, error)
-	ReadyWait(ctx context.Context, kubeContext string, namespacePtr *string, serviceNamePtr *string) error
+	GetHealthStatus(ctx context.Context, kubeContext string) (HealthStatus, error)
+	WatchHealthStatus(ctx context.Context, kubeContext string) (<-chan HealthStatus, error)
+	ReadyWait(ctx context.Context, kubeContext string) error
 }
 
 // Create new HealthMonitor instance
@@ -97,8 +97,8 @@ func (hm *DesktopHealthMonitor) Shutdown() {
 }
 
 // GetHealthStatus
-func (hm *DesktopHealthMonitor) GetHealthStatus(ctx context.Context, kubeContext string, namespacePtr *string, serviceNamePtr *string) (HealthStatus, error) {
-	worker, err := hm.getOrCreateWorker(ctx, kubeContext, namespacePtr, serviceNamePtr)
+func (hm *DesktopHealthMonitor) GetHealthStatus(ctx context.Context, kubeContext string) (HealthStatus, error) {
+	worker, err := hm.getOrCreateWorker(ctx, kubeContext)
 	if err != nil {
 		return HealthStatusUknown, err
 	}
@@ -106,8 +106,8 @@ func (hm *DesktopHealthMonitor) GetHealthStatus(ctx context.Context, kubeContext
 }
 
 // WatchHealthStatus
-func (hm *DesktopHealthMonitor) WatchHealthStatus(ctx context.Context, kubeContext string, namespacePtr *string, serviceNamePtr *string) (<-chan HealthStatus, error) {
-	worker, err := hm.getOrCreateWorker(ctx, kubeContext, namespacePtr, serviceNamePtr)
+func (hm *DesktopHealthMonitor) WatchHealthStatus(ctx context.Context, kubeContext string) (<-chan HealthStatus, error) {
+	worker, err := hm.getOrCreateWorker(ctx, kubeContext)
 	if err != nil {
 		return nil, err
 	}
@@ -115,8 +115,8 @@ func (hm *DesktopHealthMonitor) WatchHealthStatus(ctx context.Context, kubeConte
 }
 
 // ReadyWait
-func (hm *DesktopHealthMonitor) ReadyWait(ctx context.Context, kubeContext string, namespacePtr *string, serviceNamePtr *string) error {
-	worker, err := hm.getOrCreateWorker(ctx, kubeContext, namespacePtr, serviceNamePtr)
+func (hm *DesktopHealthMonitor) ReadyWait(ctx context.Context, kubeContext string) error {
+	worker, err := hm.getOrCreateWorker(ctx, kubeContext)
 	if err != nil {
 		return err
 	}
@@ -124,7 +124,7 @@ func (hm *DesktopHealthMonitor) ReadyWait(ctx context.Context, kubeContext strin
 }
 
 // getOrCreateWorker
-func (hm *DesktopHealthMonitor) getOrCreateWorker(ctx context.Context, kubeContext string, namespacePtr *string, serviceNamePtr *string) (healthMonitorWorker, error) {
+func (hm *DesktopHealthMonitor) getOrCreateWorker(ctx context.Context, kubeContext string) (healthMonitorWorker, error) {
 	// Get or create mutex for this kubeContext
 	contextMutex, _ := hm.contextMu.LoadOrStore(kubeContext, &sync.Mutex{})
 
@@ -132,14 +132,8 @@ func (hm *DesktopHealthMonitor) getOrCreateWorker(ctx context.Context, kubeConte
 	contextMutex.Lock()
 	defer contextMutex.Unlock()
 
-	namespace := ptr.Deref(namespacePtr, DefaultNamespace)
-	serviceName := ptr.Deref(serviceNamePtr, DefaultServiceName)
-
-	// Constuct cache key
-	k := fmt.Sprintf("%s::%s::%s", kubeContext, namespace, serviceName)
-
 	// Check cache
-	worker, ok := hm.workerCache.Load(k)
+	worker, ok := hm.workerCache.Load(kubeContext)
 	if !ok {
 		// Get clientset
 		clientset, err := hm.cm.GetOrCreateClientset(kubeContext)
@@ -154,7 +148,7 @@ func (hm *DesktopHealthMonitor) getOrCreateWorker(ctx context.Context, kubeConte
 			worker = newNoopHealthMonitorWorker()
 		} else {
 			// EndpointSlices supported, initialize EndpointSlicesHealthMonitor
-			worker, err = newEndpointSlicesHealthMonitorWorker(clientset, namespace, serviceName)
+			worker, err = newEndpointSlicesHealthMonitorWorker(clientset, DefaultNamespace, DefaultServiceName)
 			if err != nil {
 				return nil, err
 			}
@@ -166,7 +160,7 @@ func (hm *DesktopHealthMonitor) getOrCreateWorker(ctx context.Context, kubeConte
 		}
 
 		// Add to cache
-		hm.workerCache.Store(k, worker)
+		hm.workerCache.Store(kubeContext, worker)
 	}
 
 	return worker, nil
@@ -203,7 +197,7 @@ func (hm *InClusterHealthMonitor) Shutdown() {
 }
 
 // GetHealthStatus
-func (hm *InClusterHealthMonitor) GetHealthStatus(ctx context.Context, _kubeContext string, namespacePtr *string, serviceNamePtr *string) (HealthStatus, error) {
+func (hm *InClusterHealthMonitor) GetHealthStatus(ctx context.Context, _ string) (HealthStatus, error) {
 	worker, err := hm.getOrCreateWorker(ctx)
 	if err != nil {
 		return HealthStatusUknown, err
@@ -212,7 +206,7 @@ func (hm *InClusterHealthMonitor) GetHealthStatus(ctx context.Context, _kubeCont
 }
 
 // WatchHealthStatus
-func (hm *InClusterHealthMonitor) WatchHealthStatus(ctx context.Context, _kubeContext string, namespacePtr *string, serviceNamePtr *string) (<-chan HealthStatus, error) {
+func (hm *InClusterHealthMonitor) WatchHealthStatus(ctx context.Context, _ string) (<-chan HealthStatus, error) {
 	worker, err := hm.getOrCreateWorker(ctx)
 	if err != nil {
 		return nil, err
@@ -221,7 +215,7 @@ func (hm *InClusterHealthMonitor) WatchHealthStatus(ctx context.Context, _kubeCo
 }
 
 // ReadyWait
-func (hm *InClusterHealthMonitor) ReadyWait(ctx context.Context, _kubeContext string, namespacePtr *string, serviceNamePtr *string) error {
+func (hm *InClusterHealthMonitor) ReadyWait(ctx context.Context, _ string) error {
 	worker, err := hm.getOrCreateWorker(ctx)
 	if err != nil {
 		return err

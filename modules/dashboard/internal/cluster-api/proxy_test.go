@@ -352,7 +352,7 @@ func TestDesktopProxy_StripsOriginHeader(t *testing.T) {
 	require.NoError(t, err)
 	proxy.phCache["ctx"] = handler
 
-	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/ns/svc/relpath", nil)
+	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/relpath", nil)
 	req.Header.Set("Origin", "https://example.com")
 
 	proxy.ServeHTTP(httptest.NewRecorder(), req)
@@ -372,7 +372,7 @@ func TestDesktopProxy_RewritesPathToAggregationLayer(t *testing.T) {
 	require.NoError(t, err)
 	proxy.phCache["ctx"] = handler
 
-	req := httptest.NewRequest(http.MethodPost, "/prefix/ctx/ns/svc/graphql", nil)
+	req := httptest.NewRequest(http.MethodPost, "/prefix/ctx/graphql", nil)
 	proxy.ServeHTTP(httptest.NewRecorder(), req)
 
 	assert.Equal(t, "/apis/api.kubetail.com/v1/graphql", capturedPath)
@@ -390,7 +390,7 @@ func TestDesktopProxy_DoesNotInjectAuthorizationHeader(t *testing.T) {
 	require.NoError(t, err)
 	proxy.phCache["ctx"] = handler
 
-	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/ns/svc/relpath", nil)
+	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/relpath", nil)
 	// Client-supplied attempts must not be forwarded — under aggregation auth
 	// the kubectl proxy adds Authorization from the kubeconfig; X-Forwarded-
 	// Authorization is no longer used for identity propagation.
@@ -422,7 +422,7 @@ func TestDesktopProxy_RejectsCrossOriginUpgradeRequest(t *testing.T) {
 			require.NoError(t, err)
 			proxy.phCache["ctx"] = handler
 
-			req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/ns/svc/relpath", nil)
+			req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/relpath", nil)
 			req.Header.Set("Upgrade", "websocket")
 			req.Header.Set("Connection", "Upgrade")
 			if tt.origin != "" {
@@ -449,7 +449,7 @@ func TestDesktopProxy_AllowedOriginsAcceptsCrossHostUpgrade(t *testing.T) {
 	require.NoError(t, err)
 	proxy.phCache["ctx"] = handler
 
-	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/ns/svc/relpath", nil)
+	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/relpath", nil)
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Origin", "https://allowed.example.com")
