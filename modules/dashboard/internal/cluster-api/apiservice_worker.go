@@ -84,6 +84,16 @@ func (w *apiServiceHealthMonitorWorker) Start(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	// Seed apiSvc directly from the store. WaitForCacheSync only guarantees the
+	// store is populated, not that AddFunc has run — and AddFunc is blocked on
+	// w.mu, which we hold. Reading the store here avoids that race.
+	for _, obj := range w.informer.GetStore().List() {
+		if apiSvc := asTarget(obj); apiSvc != nil {
+			w.apiSvc = apiSvc
+			break
+		}
+	}
+
 	w.updateHealthStatus_UNSAFE()
 
 	return nil
