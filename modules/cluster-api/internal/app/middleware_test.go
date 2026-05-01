@@ -15,11 +15,13 @@
 package app
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +31,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/kubetail-org/kubetail/modules/cluster-api/graph"
 	"github.com/kubetail-org/kubetail/modules/shared/grpchelpers"
@@ -353,4 +358,71 @@ func TestAggregationAuth_FrontProxyMissingUsernameHeader(t *testing.T) {
 
 	w, _ := runMiddleware(mw, requestWithCert([]*x509.Certificate{proxyLeaf}, nil))
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
+}
+
+// caPEM returns the PEM encoding of ca.cert. Used to populate the ConfigMap
+// data in loadAggregationAuthConfig tests.
+func (ca *testCA) pem(t *testing.T) string {
+	t.Helper()
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.cert.Raw}))
+}
+
+func TestLoadAggregationAuthConfig(t *testing.T) {
+	clientCA := newTestCA(t, "client-ca")
+	proxyCA := newTestCA(t, "proxy-ca")
+
+	cs := fake.NewClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "extension-apiserver-authentication",
+			Namespace: "kube-system",
+		},
+		Data: map[string]string{
+			"client-ca-file":                     clientCA.pem(t),
+			"requestheader-client-ca-file":       proxyCA.pem(t),
+			"requestheader-allowed-names":        `["front-proxy-client"]`,
+			"requestheader-username-headers":     `["X-Remote-User"]`,
+			"requestheader-group-headers":        `["X-Remote-Group"]`,
+			"requestheader-extra-headers-prefix": `["X-Remote-Extra-"]`,
+		},
+	})
+
+	got, err := loadAggregationAuthConfig(context.Background(), cs)
+	require.NoError(t, err)
+
+	require.NotNil(t, got.ClientCAs)
+	require.NotNil(t, got.ProxyCAs)
+	assert.Equal(t, []string{"front-proxy-client"}, got.AllowedNames)
+	assert.Equal(t, []string{"X-Remote-User"}, got.UsernameHeaders)
+	assert.Equal(t, []string{"X-Remote-Group"}, got.GroupHeaders)
+	assert.Equal(t, []string{"X-Remote-Extra-"}, got.ExtraHeadersPrefixes)
+
+	// Sanity: a leaf signed by clientCA verifies against the loaded pool.
+	leaf := clientCA.issue(t, "alice")
+	_, verr := leaf.Verify(x509.VerifyOptions{Roots: got.ClientCAs, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
+	require.NoError(t, verr)
+}
+
+func TestLoadAggregationAuthConfigMissingConfigMap(t *testing.T) {
+	cs := fake.NewClientset()
+	_, err := loadAggregationAuthConfig(context.Background(), cs)
+	require.Error(t, err)
+}
+
+func TestLoadAggregationAuthConfigBadJSON(t *testing.T) {
+	clientCA := newTestCA(t, "client-ca")
+	proxyCA := newTestCA(t, "proxy-ca")
+
+	cs := fake.NewClientset(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "extension-apiserver-authentication", Namespace: "kube-system"},
+		Data: map[string]string{
+			"client-ca-file":                     clientCA.pem(t),
+			"requestheader-client-ca-file":       proxyCA.pem(t),
+			"requestheader-allowed-names":        `not json`,
+			"requestheader-username-headers":     `["X-Remote-User"]`,
+			"requestheader-group-headers":        `["X-Remote-Group"]`,
+			"requestheader-extra-headers-prefix": `["X-Remote-Extra-"]`,
+		},
+	})
+	_, err := loadAggregationAuthConfig(context.Background(), cs)
+	require.Error(t, err)
 }

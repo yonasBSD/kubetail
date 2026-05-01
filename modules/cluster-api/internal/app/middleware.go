@@ -17,6 +17,7 @@ package app
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -24,6 +25,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/kubetail-org/kubetail/modules/cluster-api/graph"
 	"github.com/kubetail-org/kubetail/modules/shared/ginhelpers"
@@ -234,4 +237,48 @@ func requireTokenMiddleware(c *gin.Context) {
 		return
 	}
 	c.Next()
+}
+
+// loadAggregationAuthConfig reads kube-system's
+// extension-apiserver-authentication ConfigMap and returns a parsed
+// aggregationAuthConfig. The kube-apiserver maintains this ConfigMap; any
+// service registered as an APIService is expected to read it for its
+// front-proxy CA + request-header configuration.
+func loadAggregationAuthConfig(ctx context.Context, cs kubernetes.Interface) (*aggregationAuthConfig, error) {
+	cm, err := cs.CoreV1().ConfigMaps("kube-system").Get(ctx, "extension-apiserver-authentication", metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("read extension-apiserver-authentication: %w", err)
+	}
+
+	clientCAs := x509.NewCertPool()
+	if pemBytes := cm.Data["client-ca-file"]; pemBytes != "" {
+		if !clientCAs.AppendCertsFromPEM([]byte(pemBytes)) {
+			return nil, fmt.Errorf("client-ca-file in extension-apiserver-authentication is not valid PEM")
+		}
+	}
+
+	proxyCAs := x509.NewCertPool()
+	if pemBytes := cm.Data["requestheader-client-ca-file"]; pemBytes != "" {
+		if !proxyCAs.AppendCertsFromPEM([]byte(pemBytes)) {
+			return nil, fmt.Errorf("requestheader-client-ca-file in extension-apiserver-authentication is not valid PEM")
+		}
+	}
+
+	out := &aggregationAuthConfig{ClientCAs: clientCAs, ProxyCAs: proxyCAs}
+	for _, f := range []struct {
+		key string
+		dst *[]string
+	}{
+		{"requestheader-allowed-names", &out.AllowedNames},
+		{"requestheader-username-headers", &out.UsernameHeaders},
+		{"requestheader-group-headers", &out.GroupHeaders},
+		{"requestheader-extra-headers-prefix", &out.ExtraHeadersPrefixes},
+	} {
+		if raw := cm.Data[f.key]; raw != "" {
+			if err := json.Unmarshal([]byte(raw), f.dst); err != nil {
+				return nil, fmt.Errorf("parse %s: %w", f.key, err)
+			}
+		}
+	}
+	return out, nil
 }
