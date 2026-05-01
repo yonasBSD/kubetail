@@ -147,6 +147,10 @@ func NewApp(cfg *config.Config) (*App, error) {
 		})
 	})
 
+	// Kubernetes API extension discovery endpoints
+	root.GET("/apis", extGroupDiscoveryHandler)
+	root.GET("/apis/api.kubetail.com/v1", extVersionDiscoveryHandler)
+
 	// Init staticFS
 	sub, err := fs.Sub(clusterapi.StaticEmbedFS, "static")
 	if err != nil {
