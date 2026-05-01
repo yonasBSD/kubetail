@@ -59,22 +59,16 @@ type ImpersonatingRoundTripper struct {
 }
 
 func (rt *ImpersonatingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	info, ok := req.Context().Value(K8SImpersonateCtxKey).(*ImpersonateInfo)
-	if !ok || info == nil || info.User == "" {
+	info, _ := req.Context().Value(K8SImpersonateCtxKey).(*ImpersonateInfo)
+	if info == nil || info.User == "" {
 		return rt.Transport.RoundTrip(req)
 	}
 
 	// Clone before mutating so we never leak headers between retries.
 	out := req.Clone(req.Context())
-	out.Header.Set("Impersonate-User", info.User)
-	for _, g := range info.Groups {
-		out.Header.Add("Impersonate-Group", g)
-	}
-	for name, vals := range info.Extras {
-		for _, v := range vals {
-			out.Header.Add("Impersonate-Extra-"+name, v)
-		}
-	}
+	info.ForEach("Impersonate-User", "Impersonate-Group", "Impersonate-Extra-", func(k, v string) {
+		out.Header.Add(k, v)
+	})
 	return rt.Transport.RoundTrip(out)
 }
 

@@ -33,8 +33,8 @@ import (
 
 func mustNewGrpcDispatcher(cfg *config.Config) *grpcdispatcher.Dispatcher {
 	dialOpts := []grpc.DialOption{
-		grpc.WithUnaryInterceptor(grpchelpers.AuthUnaryClientInterceptor),
-		grpc.WithStreamInterceptor(grpchelpers.AuthStreamClientInterceptor),
+		grpc.WithUnaryInterceptor(grpchelpers.ImpersonateUnaryClientInterceptor),
+		grpc.WithStreamInterceptor(grpchelpers.ImpersonateStreamClientInterceptor),
 	}
 
 	// configure tls
