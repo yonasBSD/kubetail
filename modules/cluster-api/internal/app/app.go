@@ -107,8 +107,9 @@ func NewApp(cfg *config.Config) (*App, error) {
 	// Routes
 	root := app.Group(cfg.BasePath)
 
-	// Dynamic routes
-	dynamicRoutes := root.Group("/")
+	// Dynamic routes mount under the Kubernetes API extension group/version
+	// so the cluster-api can be aggregated into kube-apiserver.
+	dynamicRoutes := root.Group("/apis/api.kubetail.com/v1")
 	{
 		// https://security.stackexchange.com/questions/147554/security-headers-for-a-web-api
 		// https://observatory.mozilla.org/faq/
@@ -119,19 +120,28 @@ func NewApp(cfg *config.Config) (*App, error) {
 			ContentTypeNosniff:    true,
 		}))
 
-		// authentication middleware (extracts the bearer token if present);
-		// individual routes decide whether absence is a 401 (e.g. /api/v1/download)
-		// or only a per-resolver concern (e.g. /graphql, where introspection
-		// must remain reachable for graphiql)
-		dynamicRoutes.Use(authenticationMiddleware)
+		// Aggregation-layer authentication. Skipped in test mode because the
+		// loader needs a live Kubernetes cluster (kube-system's
+		// extension-apiserver-authentication ConfigMap).
+		if gin.Mode() != gin.TestMode {
+			clientset, err := app.cm.GetOrCreateClientset("")
+			if err != nil {
+				return nil, err
+			}
+			authCfg, err := loadAggregationAuthConfig(context.TODO(), clientset)
+			if err != nil {
+				return nil, err
+			}
+			dynamicRoutes.Use(newAggregationAuthMiddleware(authCfg))
+		}
 
 		// GraphQL endpoint
 		app.graphqlServer = graph.NewServer(app.cm, app.grpcDispatcher, cfg.AllowedNamespaces)
-		dynamicRoutes.Any("/graphql", forwardedCSRFTokenMiddleware, gin.WrapH(app.graphqlServer))
+		dynamicRoutes.Any("/graphql", gin.WrapH(app.graphqlServer))
 
 		// Log download endpoint
 		dl := newDownloadHandlers(app.cm, app.grpcDispatcher, cfg.AllowedNamespaces)
-		dynamicRoutes.POST("/api/v1/download", requireTokenMiddleware, dl.DownloadPOST)
+		dynamicRoutes.POST("/download", dl.DownloadPOST)
 	}
 	app.dynamicRoutes = dynamicRoutes // for unit tests
 

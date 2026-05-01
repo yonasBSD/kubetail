@@ -16,8 +16,6 @@ package graph
 
 import (
 	"context"
-	"crypto/subtle"
-	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -34,15 +32,6 @@ import (
 
 	"github.com/kubetail-org/kubetail/modules/shared/graphql/directives"
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
-)
-
-type ctxKey int
-
-const (
-	// SessionCSRFTokenCtxKey is the request-context key for the dashboard
-	// session's CSRF token, forwarded by the dashboard reverse proxy and
-	// validated by the WebSocket InitFunc.
-	SessionCSRFTokenCtxKey ctxKey = iota
 )
 
 // Represents Server
@@ -81,11 +70,14 @@ func NewServer(cm k8shelpers.ConnectionManager, grpcDispatcher *grpcdispatcher.D
 
 	h.SetQueryCache(lru.New[*ast.QueryDocument](1000))
 
-	// Configure WebSocket. The cluster-api is intended for bot/programmatic
-	// clients, not browsers. Bots don't send Origin; browsers always do on a
-	// WebSocket upgrade. The dashboard's reverse proxy strips Origin before
-	// forwarding (after enforcing its own CSRF check), so its presence here
-	// indicates a direct browser connection — reject as CSWSH defense.
+	// Configure WebSocket. The cluster-api listener is mTLS-only, so any
+	// caller that reaches us has already authenticated via cert (direct
+	// client) or front-proxy (kube-apiserver aggregation). Browsers cannot
+	// speak mTLS to us, so CSWSH-from-browser is structurally impossible.
+	// The Origin gate stays as cheap belt-and-suspenders.
+	//
+	// TODO: revisit once the dashboard terminates browser WebSockets at its
+	// own layer and shuttles between the browser and the cluster-api.
 	h.AddTransport(&transport.Websocket{
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -94,16 +86,6 @@ func NewServer(cm k8shelpers.ConnectionManager, grpcDispatcher *grpcdispatcher.D
 			ReadBufferSize:    1024,
 			WriteBufferSize:   1024,
 			EnableCompression: false,
-		},
-		// No expected token means a bot/programmatic client (no proxy header);
-		// the upgrade-time Origin gate is the only check in that path.
-		InitFunc: func(ctx context.Context, initPayload transport.InitPayload) (context.Context, *transport.InitPayload, error) {
-			expected, _ := ctx.Value(SessionCSRFTokenCtxKey).(string)
-			got := initPayload.GetString("csrfToken")
-			if expected != "" && subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
-				return ctx, nil, errors.New("invalid CSRF token")
-			}
-			return ctx, nil, nil
 		},
 		KeepAlivePingInterval: 10 * time.Second,
 	})

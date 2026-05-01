@@ -87,7 +87,7 @@ func TestGraphQLRejectsUnauthenticatedSensitiveQuery(t *testing.T) {
 
 	body := `{"query":"{ logRecordsFetch(sources: [\"default:pod/x\"]) { records { message } } }"}`
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/graphql", strings.NewReader(body))
+	r := httptest.NewRequest("POST", "/apis/api.kubetail.com/v1/graphql", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	app.ServeHTTP(w, r)
 
@@ -109,7 +109,7 @@ func TestGraphQLAllowsUnauthenticatedIntrospection(t *testing.T) {
 
 	body := `{"query":"{ __typename }"}`
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/graphql", strings.NewReader(body))
+	r := httptest.NewRequest("POST", "/apis/api.kubetail.com/v1/graphql", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	app.ServeHTTP(w, r)
 
