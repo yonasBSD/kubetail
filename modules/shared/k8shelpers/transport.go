@@ -46,6 +46,42 @@ func NewBearerTokenRoundTripper(transport http.RoundTripper) *BearerTokenRoundTr
 	return &BearerTokenRoundTripper{transport}
 }
 
+// ImpersonatingRoundTripper sets Impersonate-User / Impersonate-Group /
+// Impersonate-Extra-* headers from a per-request *ImpersonateInfo carried in
+// the request context. The cluster-api uses this when fronted by the
+// kube-apiserver aggregation layer: the underlying connection authenticates
+// as the cluster-api ServiceAccount, and these headers tell the kube-apiserver
+// to act as the originating user. Requests without an ImpersonateInfo pass
+// through unchanged so unrelated callers (e.g. health-check loops) keep
+// working.
+type ImpersonatingRoundTripper struct {
+	Transport http.RoundTripper
+}
+
+func (rt *ImpersonatingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	info, ok := req.Context().Value(K8SImpersonateCtxKey).(*ImpersonateInfo)
+	if !ok || info == nil || info.User == "" {
+		return rt.Transport.RoundTrip(req)
+	}
+
+	// Clone before mutating so we never leak headers between retries.
+	out := req.Clone(req.Context())
+	out.Header.Set("Impersonate-User", info.User)
+	for _, g := range info.Groups {
+		out.Header.Add("Impersonate-Group", g)
+	}
+	for name, vals := range info.Extras {
+		for _, v := range vals {
+			out.Header.Add("Impersonate-Extra-"+name, v)
+		}
+	}
+	return rt.Transport.RoundTrip(out)
+}
+
+func NewImpersonatingRoundTripper(transport http.RoundTripper) *ImpersonatingRoundTripper {
+	return &ImpersonatingRoundTripper{Transport: transport}
+}
+
 // Represents round tripper for service account tokens mounted locally
 // at "/var/run/secrets/kubernetes.io/serviceaccount/token"
 type InClusterSATRoundTripper struct {

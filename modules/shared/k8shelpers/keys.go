@@ -16,4 +16,16 @@ package k8shelpers
 
 type Key int
 
-const K8STokenCtxKey Key = iota
+const (
+	K8STokenCtxKey Key = iota
+	K8SImpersonateCtxKey
+)
+
+// ImpersonateInfo carries the identity that downstream Kubernetes API calls
+// should impersonate. Populated from the aggregation auth middleware when the
+// cluster-api is fronted by the kube-apiserver aggregation layer.
+type ImpersonateInfo struct {
+	User   string
+	Groups []string
+	Extras map[string][]string
+}
