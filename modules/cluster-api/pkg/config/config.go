@@ -55,9 +55,11 @@ type Config struct {
 	}
 
 	TLS struct {
-		Enabled  bool
-		CertFile string `mapstructure:"cert-file" validate:"omitempty,file"`
-		KeyFile  string `mapstructure:"key-file" validate:"omitempty,file"`
+		Enabled        bool
+		CertFile       string `mapstructure:"cert-file" validate:"omitempty,file"`
+		KeyFile        string `mapstructure:"key-file" validate:"omitempty,file"`
+		ClientCAFile   string `mapstructure:"client-ca-file" validate:"omitempty,file"`
+		ClientAuthType string `mapstructure:"client-auth-type" validate:"omitempty,oneof=none request require verify-if-given require-and-verify"`
 	}
 }
 
@@ -90,6 +92,8 @@ func DefaultConfig() *Config {
 	cfg.TLS.Enabled = false
 	cfg.TLS.CertFile = ""
 	cfg.TLS.KeyFile = ""
+	cfg.TLS.ClientCAFile = ""
+	cfg.TLS.ClientAuthType = ""
 
 	return cfg
 }
