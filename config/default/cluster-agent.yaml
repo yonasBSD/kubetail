@@ -99,3 +99,19 @@ tls:
   # Default value: none
   #
   client-auth: none
+
+  ## allowed-names ##
+  #
+  # Allowlist of peer-certificate Common Names whose forwarded identity
+  # headers (x-remote-user, x-remote-group, x-remote-extra-*) the agent
+  # will trust. The TLS layer accepts any cert signed by the configured CA;
+  # this list narrows that to the specific clients authorized to assert
+  # identity on behalf of end users (e.g. the cluster-api).
+  #
+  # An empty list accepts any verified peer CN, matching kube-apiserver's
+  # `requestheader-allowed-names` semantics. When the CA is shared with
+  # other workloads, populate this list with the cluster-api Service CN.
+  #
+  # Default value: []
+  #
+  allowed-names: []
