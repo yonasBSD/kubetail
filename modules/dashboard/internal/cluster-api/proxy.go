@@ -305,10 +305,15 @@ func (p *InClusterProxy) DrainWithContext(ctx context.Context) error {
 	}
 }
 
-// Create new InClusterProxy with injectable transport (used in tests)
-func newInClusterProxy(clusterAPIEndpoint string, pathPrefix string, allowedOrigins []string, transport http.RoundTripper) (*InClusterProxy, error) {
-	// Parse endpoint url
-	endpointUrl, err := url.Parse(clusterAPIEndpoint)
+// Create new InClusterProxy with injectable transport (used in tests).
+//
+// The configured endpoint must point at the kube-apiserver — the cluster-api
+// is reached via the v1.api.kubetail.com APIService, so we send the request
+// to the apiserver and let aggregation forward it. The user's bearer token
+// is forwarded as Authorization (the apiserver's expected header), which
+// also drives the front-proxy headers the cluster-api receives.
+func newInClusterProxy(kubeAPIServerEndpoint string, pathPrefix string, allowedOrigins []string, transport http.RoundTripper) (*InClusterProxy, error) {
+	endpointUrl, err := url.Parse(kubeAPIServerEndpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -316,14 +321,20 @@ func newInClusterProxy(clusterAPIEndpoint string, pathPrefix string, allowedOrig
 	// Init reverseProxy
 	reverseProxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-			// Re-write url
+			// Rewrite to the cluster-api APIService path on the apiserver.
+			rel := strings.TrimPrefix(r.URL.Path, pathPrefix)
 			targetUrl := endpointUrl
-			targetUrl.Path = path.Join("/", strings.TrimPrefix(r.URL.Path, pathPrefix))
+			targetUrl.Path = path.Join("/apis/api.kubetail.com/v1", rel)
 			r.URL = targetUrl
 
-			// Forward user token if present
-			if token, ok := r.Context().Value(k8shelpers.K8STokenCtxKey).(string); ok {
-				r.Header.Set("X-Forwarded-Authorization", fmt.Sprintf("Bearer %s", token))
+			// Drop client-supplied auth headers so a malicious upstream
+			// header can't ride through. Then forward the session user's
+			// token as Authorization (kube-apiserver auths the caller as
+			// that user; aggregation then attaches front-proxy headers).
+			r.Header.Del("Authorization")
+			r.Header.Del("X-Forwarded-Authorization")
+			if token, ok := r.Context().Value(k8shelpers.K8STokenCtxKey).(string); ok && token != "" {
+				r.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 			}
 
 			// Strip the browser-supplied Origin so the cluster-api can treat its

@@ -113,29 +113,38 @@ func TestInClusterProxy_AllowedOriginsAcceptsCrossHostUpgrade(t *testing.T) {
 	assert.True(t, captured, "allowlisted upgrade must reach the backend")
 }
 
-func TestInClusterProxy_XForwardedAuthorization(t *testing.T) {
+func TestInClusterProxy_ForwardsUserTokenAsAuthorization(t *testing.T) {
 	tests := []struct {
-		name       string
-		userToken  string
-		wantHeader string
+		name      string
+		userToken string
+		clientHdr string
+		wantAuth  string
+		wantFwd   string
 	}{
 		{
-			name:       "forwards user token as X-Forwarded-Authorization",
-			userToken:  "user-token-123",
-			wantHeader: "Bearer user-token-123",
+			name:      "forwards user token as Authorization",
+			userToken: "user-token-123",
+			wantAuth:  "Bearer user-token-123",
 		},
 		{
-			name:       "no X-Forwarded-Authorization without user token",
-			userToken:  "",
-			wantHeader: "",
+			name:      "no Authorization without user token",
+			userToken: "",
+			wantAuth:  "",
+		},
+		{
+			name:      "ignores client-supplied Authorization without a session token",
+			userToken: "",
+			clientHdr: "Bearer attacker",
+			wantAuth:  "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var capturedHeader string
+			var capturedAuth, capturedFwd string
 			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				capturedHeader = r.Header.Get("X-Forwarded-Authorization")
+				capturedAuth = r.Header.Get("Authorization")
+				capturedFwd = r.Header.Get("X-Forwarded-Authorization")
 				w.WriteHeader(http.StatusOK)
 			}))
 			defer backend.Close()
@@ -144,6 +153,9 @@ func TestInClusterProxy_XForwardedAuthorization(t *testing.T) {
 			require.NoError(t, err)
 
 			req := httptest.NewRequest(http.MethodGet, "/prefix/somepath", nil)
+			if tt.clientHdr != "" {
+				req.Header.Set("Authorization", tt.clientHdr)
+			}
 			if tt.userToken != "" {
 				ctx := context.WithValue(req.Context(), k8shelpers.K8STokenCtxKey, tt.userToken)
 				req = req.WithContext(ctx)
@@ -151,9 +163,27 @@ func TestInClusterProxy_XForwardedAuthorization(t *testing.T) {
 
 			proxy.ServeHTTP(httptest.NewRecorder(), req)
 
-			assert.Equal(t, tt.wantHeader, capturedHeader)
+			assert.Equal(t, tt.wantAuth, capturedAuth)
+			assert.Equal(t, tt.wantFwd, capturedFwd)
 		})
 	}
+}
+
+func TestInClusterProxy_RewritesPathToAggregationLayer(t *testing.T) {
+	var capturedPath string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	proxy, err := newInClusterProxy(backend.URL, "/prefix", nil, http.DefaultTransport)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/prefix/graphql", nil)
+	proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+	assert.Equal(t, "/apis/api.kubetail.com/v1/graphql", capturedPath)
 }
 
 // --- InClusterProxy drain/shutdown tests ---
