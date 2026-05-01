@@ -64,6 +64,10 @@ pub struct TlsConfig {
 
     #[serde(rename(deserialize = "client-auth"))]
     pub client_auth: Option<String>,
+
+    #[serde(rename(deserialize = "allowed-names"), default)]
+    #[allow(dead_code)] // wired in trust-chain interceptor cycle
+    pub allowed_names: Vec<String>,
 }
 
 impl Config {
@@ -406,6 +410,83 @@ tls:
         assert!(config.logging.enabled);
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.logging.format, "json");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_allowed_names_defaults_to_empty() {
+        let config_content = r#"addr: ":8080"
+container-logs-dir: "/logs"
+logging:
+  enabled: true
+  level: "info"
+  format: "json"
+tls:
+  enabled: false
+"#;
+        let file = create_config_file(config_content, ".yaml");
+
+        let config = Config::parse(file.path(), vec![])
+            .await
+            .expect("Failed to parse config");
+
+        assert!(config.tls.allowed_names.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_allowed_names_parses_list() {
+        let config_content = r#"addr: ":8080"
+container-logs-dir: "/logs"
+logging:
+  enabled: true
+  level: "info"
+  format: "json"
+tls:
+  enabled: true
+  cert-file: "/path/to/cert.pem"
+  key-file: "/path/to/key.pem"
+  ca-file: "/path/to/ca.pem"
+  client-auth: "require-and-verify"
+  allowed-names:
+    - "kubetail-cluster-api"
+    - "other-trusted-proxy"
+"#;
+        let file = create_config_file(config_content, ".yaml");
+
+        let config = Config::parse(file.path(), vec![])
+            .await
+            .expect("Failed to parse config");
+
+        assert_eq!(
+            config.tls.allowed_names,
+            vec![
+                "kubetail-cluster-api".to_string(),
+                "other-trusted-proxy".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_allowed_names_empty_list_when_explicitly_set() {
+        let config_content = r#"addr: ":8080"
+container-logs-dir: "/logs"
+logging:
+  enabled: true
+  level: "info"
+  format: "json"
+tls:
+  enabled: false
+  allowed-names: []
+"#;
+        let file = create_config_file(config_content, ".yaml");
+
+        let config = Config::parse(file.path(), vec![])
+            .await
+            .expect("Failed to parse config");
+
+        assert!(config.tls.allowed_names.is_empty());
     }
 
     #[tokio::test]
