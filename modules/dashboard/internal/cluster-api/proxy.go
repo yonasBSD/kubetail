@@ -85,7 +85,6 @@ type DesktopProxy struct {
 	pathPrefix     string
 	allowedOrigins []string
 	phCache        map[string]http.Handler
-	satCache       map[string]*k8shelpers.ServiceAccountToken
 	mu             sync.Mutex
 	shutdownCh     chan struct{}
 	wg             sync.WaitGroup
@@ -116,45 +115,38 @@ func (p *DesktopProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("did not understand url: %s", origPath), http.StatusInternalServerError)
 		return
 	}
-	kubeContext, namespace, serviceName, relPath := matches[1], matches[2], matches[3], matches[4]
+	// namespace and serviceName remain in the URL for compatibility with
+	// existing frontend routes but are no longer meaningful — the cluster-api
+	// is reached via the kube-apiserver aggregation layer, which doesn't care
+	// where the backing Service lives.
+	kubeContext, _, _, relPath := matches[1], matches[2], matches[3], matches[4]
 
-	// Get Kubernetes proxy handler
+	// Get Kubernetes proxy handler. The handler authenticates against
+	// kube-apiserver using whatever credentials the kubeconfig supplies
+	// (typically the user's bearer token or client cert), so the
+	// aggregation auth path identifies the originating user.
 	h, err := p.getOrCreateKubernetesProxyHandler(kubeContext)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Re-write url
-	newPath := path.Join("/api/v1/namespaces", namespace, "services", fmt.Sprintf("%s:http", serviceName), "proxy", relPath)
-	if strings.HasSuffix(newPath, "/proxy") {
-		newPath += "/"
-	}
+	// Rewrite to the cluster-api's APIService path.
 	u := *r.URL
-	u.Path = newPath
+	u.Path = path.Join("/apis/api.kubetail.com/v1", relPath)
 	r.URL = &u
-
-	// Get service-account-token
-	sat, err := p.getOrCreateServiceAccountToken(r.Context(), kubeContext, namespace)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Add token to authentication header
-	token, err := sat.Token(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	r.Header.Del("X-Forwarded-Authorization")
-	r.Header.Set("X-Forwarded-Authorization", fmt.Sprintf("Bearer %s", token))
 
 	// Strip the browser-supplied Origin so the cluster-api can treat its
 	// presence as a CSWSH signal. Cross-origin browser upgrades are already
 	// rejected by the same-origin gate above; cross-site non-upgrade browser
 	// requests are rejected by csrfProtectionMiddleware before reaching here.
 	r.Header.Del("Origin")
+
+	// Drop any client-supplied auth headers — kubectl proxy attaches its own
+	// based on the kubeconfig, and X-Forwarded-Authorization is no longer
+	// honored by the cluster-api.
+	r.Header.Del("Authorization")
+	r.Header.Del("X-Forwarded-Authorization")
 
 	// Passthrough upgrade requests, closing the hijacked connection on shutdown
 	if r.Header.Get("Upgrade") != "" {
@@ -241,35 +233,6 @@ func (p *DesktopProxy) getOrCreateKubernetesProxyHandler(kubeContext string) (ht
 	return h, nil
 }
 
-// Get or create service-account-token
-func (p *DesktopProxy) getOrCreateServiceAccountToken(ctx context.Context, kubeContext string, namespace string) (*k8shelpers.ServiceAccountToken, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Generate cache key
-	k := fmt.Sprintf("%s/%s", kubeContext, namespace)
-
-	// Check cache
-	sat, exists := p.satCache[k]
-	if !exists {
-		clientset, err := p.cm.GetOrCreateClientset(kubeContext)
-		if err != nil {
-			return nil, err
-		}
-
-		// Initialize new service-account-token
-		sat, err = k8shelpers.NewServiceAccountToken(ctx, clientset, namespace, "kubetail-cli", p.shutdownCh)
-		if err != nil {
-			return nil, err
-		}
-
-		// Add to cache
-		p.satCache[k] = sat
-	}
-
-	return sat, nil
-}
-
 // Create new DesktopProxy. allowedOrigins is forwarded to the WebSocket
 // upgrade origin check (see httphelpers.IsAllowedOrigin).
 func NewDesktopProxy(cm k8shelpers.ConnectionManager, pathPrefix string, allowedOrigins []string) (*DesktopProxy, error) {
@@ -278,7 +241,6 @@ func NewDesktopProxy(cm k8shelpers.ConnectionManager, pathPrefix string, allowed
 		pathPrefix:     pathPrefix,
 		allowedOrigins: allowedOrigins,
 		phCache:        make(map[string]http.Handler),
-		satCache:       make(map[string]*k8shelpers.ServiceAccountToken),
 		shutdownCh:     make(chan struct{}),
 	}, nil
 }

@@ -24,11 +24,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	authv1 "k8s.io/api/authentication/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
@@ -323,28 +318,11 @@ func TestDesktopProxy_StripsOriginHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	clientset := fake.NewSimpleClientset()
-	clientset.Fake.PrependReactor("create", "serviceaccounts", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		return true, &authv1.TokenRequest{
-			Status: authv1.TokenRequestStatus{
-				Token:               "fake-sat",
-				ExpirationTimestamp: metav1.NewTime(time.Now().Add(time.Hour)),
-			},
-		}, nil
-	})
-
-	shutdownCh := make(chan struct{})
-	defer close(shutdownCh)
-	sat, err := k8shelpers.NewServiceAccountToken(context.Background(), clientset, "ns", "sa", shutdownCh)
-	require.NoError(t, err)
-
 	proxy, err := NewDesktopProxy(nil, "/prefix", nil)
 	require.NoError(t, err)
 	proxy.phCache["ctx"] = handler
-	proxy.satCache["ctx/ns"] = sat
 
 	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/ns/svc/relpath", nil)
-	// httptest.NewRequest uses example.com as the request Host
 	req.Header.Set("Origin", "https://example.com")
 
 	proxy.ServeHTTP(httptest.NewRecorder(), req)
@@ -353,44 +331,44 @@ func TestDesktopProxy_StripsOriginHeader(t *testing.T) {
 	assert.Empty(t, capturedOrigin, "Origin header must be stripped before forwarding")
 }
 
-func TestDesktopProxy_OverwritesClientSuppliedXForwardedAuthorization(t *testing.T) {
-	var capturedValues []string
+func TestDesktopProxy_RewritesPathToAggregationLayer(t *testing.T) {
+	var capturedPath string
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedValues = r.Header.Values("X-Forwarded-Authorization")
+		capturedPath = r.URL.Path
 		w.WriteHeader(http.StatusOK)
 	})
-
-	clientset := fake.NewSimpleClientset()
-	clientset.Fake.PrependReactor("create", "serviceaccounts", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		return true, &authv1.TokenRequest{
-			Status: authv1.TokenRequestStatus{
-				Token:               "fake-sat",
-				ExpirationTimestamp: metav1.NewTime(time.Now().Add(time.Hour)),
-			},
-		}, nil
-	})
-
-	shutdownCh := make(chan struct{})
-	defer close(shutdownCh)
-	sat, err := k8shelpers.NewServiceAccountToken(context.Background(), clientset, "ns", "sa", shutdownCh)
-	require.NoError(t, err)
 
 	proxy, err := NewDesktopProxy(nil, "/prefix", nil)
 	require.NoError(t, err)
 	proxy.phCache["ctx"] = handler
-	proxy.satCache["ctx/ns"] = sat
 
-	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/ns/svc/relpath", nil)
-	req.Header.Set("Origin", "https://example.com")
-	// Client-supplied attempt to inject an upstream token. The proxy must
-	// clobber this value with its own service-account-token bearer header
-	// rather than appending alongside it.
-	req.Header.Set("X-Forwarded-Authorization", "Bearer attacker-token")
-
+	req := httptest.NewRequest(http.MethodPost, "/prefix/ctx/ns/svc/graphql", nil)
 	proxy.ServeHTTP(httptest.NewRecorder(), req)
 
-	require.Len(t, capturedValues, 1, "exactly one X-Forwarded-Authorization value must be forwarded")
-	assert.Equal(t, "Bearer fake-sat", capturedValues[0])
+	assert.Equal(t, "/apis/api.kubetail.com/v1/graphql", capturedPath)
+}
+
+func TestDesktopProxy_DoesNotInjectAuthorizationHeader(t *testing.T) {
+	var capturedAuth, capturedFwd string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		capturedFwd = r.Header.Get("X-Forwarded-Authorization")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	proxy, err := NewDesktopProxy(nil, "/prefix", nil)
+	require.NoError(t, err)
+	proxy.phCache["ctx"] = handler
+
+	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/ns/svc/relpath", nil)
+	// Client-supplied attempts must not be forwarded — under aggregation auth
+	// the kubectl proxy adds Authorization from the kubeconfig; X-Forwarded-
+	// Authorization is no longer used for identity propagation.
+	req.Header.Set("X-Forwarded-Authorization", "Bearer attacker-token")
+	proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+	assert.Empty(t, capturedAuth, "kubectl proxy handler attaches Authorization itself; the request reaching it must not carry one")
+	assert.Empty(t, capturedFwd, "X-Forwarded-Authorization must not be forwarded")
 }
 
 func TestDesktopProxy_RejectsCrossOriginUpgradeRequest(t *testing.T) {
@@ -437,25 +415,9 @@ func TestDesktopProxy_AllowedOriginsAcceptsCrossHostUpgrade(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	clientset := fake.NewSimpleClientset()
-	clientset.Fake.PrependReactor("create", "serviceaccounts", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		return true, &authv1.TokenRequest{
-			Status: authv1.TokenRequestStatus{
-				Token:               "fake-sat",
-				ExpirationTimestamp: metav1.NewTime(time.Now().Add(time.Hour)),
-			},
-		}, nil
-	})
-
-	shutdownCh := make(chan struct{})
-	defer close(shutdownCh)
-	sat, err := k8shelpers.NewServiceAccountToken(context.Background(), clientset, "ns", "sa", shutdownCh)
-	require.NoError(t, err)
-
 	proxy, err := NewDesktopProxy(nil, "/prefix", []string{"https://allowed.example.com"})
 	require.NoError(t, err)
 	proxy.phCache["ctx"] = handler
-	proxy.satCache["ctx/ns"] = sat
 
 	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/ns/svc/relpath", nil)
 	req.Header.Set("Upgrade", "websocket")
