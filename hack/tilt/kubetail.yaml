@@ -136,6 +136,11 @@ rules:
   - apiGroups: [apiregistration.k8s.io]
     resources: [apiservices]
     verbs: [get, list, watch]
+  # Lets the dashboard SA call the aggregated cluster-api when no user
+  # token is in context (auto-mode fallback in InClusterProxy).
+  - apiGroups: [api.kubetail.com]
+    resources: [graphql, download]
+    verbs: [get, create]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

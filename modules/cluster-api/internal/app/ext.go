@@ -42,11 +42,19 @@ func extGroupDiscoveryHandler(c *gin.Context) {
 func extVersionDiscoveryHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, &metav1.APIResourceList{
 		GroupVersion: "api.kubetail.com/v1",
-		APIResources: []metav1.APIResource{{
-			Name:       "graphql",
-			Namespaced: false,
-			Kind:       "GraphQL",
-			Verbs:      []string{"get", "create"},
-		}},
+		APIResources: []metav1.APIResource{
+			{
+				Name:       "graphql",
+				Namespaced: false,
+				Kind:       "GraphQL",
+				Verbs:      []string{"get", "create"},
+			},
+			{
+				Name:       "download",
+				Namespaced: false,
+				Kind:       "Download",
+				Verbs:      []string{"create"},
+			},
+		},
 	})
 }

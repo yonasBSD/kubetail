@@ -57,4 +57,17 @@ func TestExtensionVersionDiscovery(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
 	assert.Equal(t, "api.kubetail.com/v1", got.GroupVersion)
 	assert.NotEmpty(t, got.APIResources, "discovery must advertise at least one resource so kube-apiserver accepts the registration")
+
+	byName := map[string]metav1.APIResource{}
+	for _, r := range got.APIResources {
+		byName[r.Name] = r
+	}
+	if assert.Contains(t, byName, "graphql") {
+		assert.Equal(t, "GraphQL", byName["graphql"].Kind)
+		assert.ElementsMatch(t, []string{"get", "create"}, byName["graphql"].Verbs)
+	}
+	if assert.Contains(t, byName, "download") {
+		assert.Equal(t, "Download", byName["download"].Kind)
+		assert.ElementsMatch(t, []string{"create"}, byName["download"].Verbs)
+	}
 }
