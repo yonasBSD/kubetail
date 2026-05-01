@@ -363,7 +363,6 @@ dependencies = [
  "colored",
  "config",
  "either",
- "http",
  "k8s-openapi",
  "kube",
  "moka",

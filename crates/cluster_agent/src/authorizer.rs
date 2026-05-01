@@ -15,21 +15,59 @@
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SubjectAccessReview, SubjectAccessReviewSpec,
 };
-
-use kube::Config;
-
-#[cfg(not(test))]
-use kube::api::PostParams;
 use tonic::Status;
 
 use crate::auth::Identity;
 use moka::future::Cache;
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Performs a Kubernetes `SubjectAccessReview` for a single SAR.
+#[tonic::async_trait]
+pub trait AccessReviewer: std::fmt::Debug + Send + Sync + 'static {
+    async fn review(&self, sar: SubjectAccessReview) -> Result<bool, Status>;
+}
+
+#[derive(Debug)]
+struct KubeAccessReviewer {
+    api: kube::Api<SubjectAccessReview>,
+}
+
+#[tonic::async_trait]
+impl AccessReviewer for KubeAccessReviewer {
+    async fn review(&self, sar: SubjectAccessReview) -> Result<bool, Status> {
+        let response = self
+            .api
+            .create(&kube::api::PostParams::default(), &sar)
+            .await
+            .map_err(|error| {
+                Status::new(
+                    tonic::Code::Unknown,
+                    format!("failed to authenticate {error}"),
+                )
+            })?;
+        Ok(response.status.as_ref().is_some_and(|s| s.allowed))
+    }
+}
+
+/// Always-allow reviewer used by tests in other modules that need to
+/// construct an `Authorizer` without a live cluster.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct AlwaysAllowReviewer;
+
+#[cfg(test)]
+#[tonic::async_trait]
+impl AccessReviewer for AlwaysAllowReviewer {
+    async fn review(&self, _sar: SubjectAccessReview) -> Result<bool, Status> {
+        Ok(true)
+    }
+}
 
 /// Key for the authorization cache: (identity, namespace, verb)
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CacheKey {
-    identity: Identity,
+    identity: Arc<Identity>,
     namespace: String,
     verb: String,
 }
@@ -45,7 +83,7 @@ fn create_auth_cache() -> AuthCache {
 
 #[derive(Debug, Clone)]
 pub struct Authorizer {
-    k8s_config: Config,
+    reviewer: Arc<dyn AccessReviewer>,
     auth_cache: AuthCache,
 }
 
@@ -97,31 +135,20 @@ fn permission_denied(verb: &str, namespace: Option<&str>) -> Status {
     )
 }
 
-#[cfg(not(test))]
 impl Authorizer {
-    pub async fn new() -> Result<Self, Status> {
-        let k8s_config = Config::infer().await.map_err(|error| {
-            Status::new(
-                tonic::Code::Unknown,
-                format!("unable to infer k8s config {error}"),
-            )
-        })?;
-        Ok(Self {
-            k8s_config,
+    pub fn with_reviewer(reviewer: Arc<dyn AccessReviewer>) -> Self {
+        Self {
+            reviewer,
             auth_cache: create_auth_cache(),
-        })
+        }
     }
 
     pub async fn is_authorized(
         &self,
-        identity: &Identity,
+        identity: &Arc<Identity>,
         namespaces: &[String],
         verb: &str,
     ) -> Result<(), Status> {
-        let client = kube::Client::try_from(self.k8s_config.clone())
-            .map_err(|error| Status::new(tonic::Code::Unauthenticated, error.to_string()))?;
-        let access_reviews: kube::Api<SubjectAccessReview> = kube::Api::all(client);
-
         let namespaces_to_check: Vec<Option<&str>> = if namespaces.is_empty() {
             vec![None]
         } else {
@@ -139,16 +166,7 @@ impl Authorizer {
                 cached
             } else {
                 let sar = build_sar(identity, namespace, verb);
-                let response = access_reviews
-                    .create(&PostParams::default(), &sar)
-                    .await
-                    .map_err(|error| {
-                        Status::new(
-                            tonic::Code::Unknown,
-                            format!("failed to authenticate {error}"),
-                        )
-                    })?;
-                let allowed = response.status.as_ref().is_some_and(|s| s.allowed);
+                let allowed = self.reviewer.review(sar).await?;
                 self.auth_cache.insert(cache_key, allowed).await;
                 allowed
             };
@@ -162,22 +180,18 @@ impl Authorizer {
     }
 }
 
-#[cfg(test)]
 impl Authorizer {
     pub async fn new() -> Result<Self, Status> {
-        Ok(Self {
-            k8s_config: Config::new(http::Uri::from_static("http://k8s.url")),
-            auth_cache: create_auth_cache(),
-        })
-    }
-
-    pub async fn is_authorized(
-        &self,
-        _identity: &Identity,
-        _namespaces: &[String],
-        _verb: &str,
-    ) -> Result<(), Status> {
-        Ok(())
+        let cfg = kube::Config::infer().await.map_err(|error| {
+            Status::new(
+                tonic::Code::Unknown,
+                format!("unable to infer k8s config {error}"),
+            )
+        })?;
+        let client = kube::Client::try_from(cfg)
+            .map_err(|error| Status::new(tonic::Code::Unauthenticated, error.to_string()))?;
+        let api: kube::Api<SubjectAccessReview> = kube::Api::all(client);
+        Ok(Self::with_reviewer(Arc::new(KubeAccessReviewer { api })))
     }
 }
 
@@ -235,7 +249,7 @@ mod tests {
 
     fn key(identity: Identity) -> CacheKey {
         CacheKey {
-            identity,
+            identity: Arc::new(identity),
             namespace: "ns".to_owned(),
             verb: "get".to_owned(),
         }
@@ -262,6 +276,92 @@ mod tests {
         key(a).hash(&mut h1);
         key(b).hash(&mut h2);
         assert_eq!(h1.finish(), h2.finish());
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct CountingReviewer {
+        count: AtomicUsize,
+        allow: bool,
+    }
+
+    impl CountingReviewer {
+        fn new(allow: bool) -> Self {
+            Self {
+                count: AtomicUsize::new(0),
+                allow,
+            }
+        }
+        fn calls(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[tonic::async_trait]
+    impl AccessReviewer for CountingReviewer {
+        async fn review(&self, _sar: SubjectAccessReview) -> Result<bool, Status> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(self.allow)
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_hit_avoids_second_review() {
+        let reviewer = Arc::new(CountingReviewer::new(true));
+        let auth = Authorizer::with_reviewer(reviewer.clone());
+        let id = Arc::new(id("alice"));
+        let ns = vec!["ns".to_string()];
+        auth.is_authorized(&id, &ns, "get").await.unwrap();
+        auth.is_authorized(&id, &ns, "get").await.unwrap();
+        assert_eq!(reviewer.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_miss_per_namespace() {
+        let reviewer = Arc::new(CountingReviewer::new(true));
+        let auth = Authorizer::with_reviewer(reviewer.clone());
+        let id = Arc::new(id("alice"));
+        auth.is_authorized(&id, &["a".to_string()], "get")
+            .await
+            .unwrap();
+        auth.is_authorized(&id, &["b".to_string()], "get")
+            .await
+            .unwrap();
+        assert_eq!(reviewer.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn reordered_groups_share_cache_entry() {
+        let reviewer = Arc::new(CountingReviewer::new(true));
+        let auth = Authorizer::with_reviewer(reviewer.clone());
+        let a = Arc::new(Identity {
+            user: "alice".into(),
+            groups: BTreeSet::from(["x".to_string(), "y".to_string()]),
+            extras: BTreeMap::new(),
+        });
+        let b = Arc::new(Identity {
+            user: "alice".into(),
+            groups: ["y", "x"].iter().map(|s| s.to_string()).collect(),
+            extras: BTreeMap::new(),
+        });
+        let ns = vec!["ns".to_string()];
+        auth.is_authorized(&a, &ns, "get").await.unwrap();
+        auth.is_authorized(&b, &ns, "get").await.unwrap();
+        assert_eq!(reviewer.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn deny_decision_is_cached() {
+        let reviewer = Arc::new(CountingReviewer::new(false));
+        let auth = Authorizer::with_reviewer(reviewer.clone());
+        let id = Arc::new(id("alice"));
+        let ns = vec!["ns".to_string()];
+        let r1 = auth.is_authorized(&id, &ns, "get").await;
+        let r2 = auth.is_authorized(&id, &ns, "get").await;
+        assert_eq!(r1.unwrap_err().code(), tonic::Code::PermissionDenied);
+        assert_eq!(r2.unwrap_err().code(), tonic::Code::PermissionDenied);
+        assert_eq!(reviewer.calls(), 1);
     }
 
     #[test]

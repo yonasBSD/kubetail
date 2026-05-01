@@ -236,11 +236,12 @@ impl LogMetadataService for LogMetadataImpl {
 #[cfg(test)]
 mod test {
     use crate::auth::Identity;
-    use crate::authorizer::Authorizer;
+    use crate::authorizer::{AlwaysAllowReviewer, Authorizer};
     use crate::log_metadata::LogMetadataImpl;
     use serial_test::parallel;
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::{Builder, NamedTempFile};
     use tokio_util::{sync::CancellationToken, task::TaskTracker};
     use tonic::Request;
@@ -248,13 +249,17 @@ mod test {
         LogMetadata, LogMetadataListRequest, log_metadata_service_server::LogMetadataService,
     };
 
+    fn test_authorizer() -> Authorizer {
+        Authorizer::with_reviewer(Arc::new(AlwaysAllowReviewer))
+    }
+
     fn req_with_identity(payload: LogMetadataListRequest) -> Request<LogMetadataListRequest> {
         let mut req = Request::new(payload);
-        req.extensions_mut().insert(Identity {
+        req.extensions_mut().insert(Arc::new(Identity {
             user: "test-user".into(),
             groups: BTreeSet::new(),
             extras: BTreeMap::new(),
-        });
+        }));
         req
     }
 
@@ -277,7 +282,7 @@ mod test {
     async fn test_single_file_is_returned() {
         let file = create_test_file("pod-name_single-namespace_container-name-containerid", 4);
         let logs_dir = file.path().parent().unwrap().to_path_buf();
-        let authorizer = Authorizer::new().await.unwrap();
+        let authorizer = test_authorizer();
 
         let metadata_service = LogMetadataImpl::new(
             CancellationToken::new(),
@@ -333,7 +338,7 @@ mod test {
             4,
         );
         let logs_dir = third_file.path().parent().unwrap().to_path_buf();
-        let authorizer = Authorizer::new().await.unwrap();
+        let authorizer = test_authorizer();
 
         let metadata_service = LogMetadataImpl::new(
             CancellationToken::new(),
@@ -397,7 +402,7 @@ mod test {
         );
 
         let logs_dir = first_file.path().parent().unwrap().to_path_buf();
-        let authorizer = Authorizer::new().await.unwrap();
+        let authorizer = test_authorizer();
 
         let metadata_service = LogMetadataImpl::new(
             CancellationToken::new(),

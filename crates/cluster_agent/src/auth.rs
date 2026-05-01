@@ -151,16 +151,16 @@ pub fn interceptor(
             req.metadata(),
             &allowed_names,
         )?;
-        req.extensions_mut().insert(id);
+        req.extensions_mut().insert(Arc::new(id));
         Ok(req)
     }
 }
 
 /// Pull the `Identity` stashed on the request by [`interceptor`], or reject
 /// the request with `Unauthenticated` if it's missing.
-pub fn identity_from<T>(req: &Request<T>) -> Result<Identity, Status> {
+pub fn identity_from<T>(req: &Request<T>) -> Result<Arc<Identity>, Status> {
     req.extensions()
-        .get::<Identity>()
+        .get::<Arc<Identity>>()
         .cloned()
         .ok_or_else(|| Status::unauthenticated("identity not present on request"))
 }
