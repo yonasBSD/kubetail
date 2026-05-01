@@ -106,43 +106,36 @@ func requestWithCert(certs []*x509.Certificate, headers map[string]string) *http
 	return r
 }
 
-// runMiddleware executes mw against r and returns the recorder, the gin
-// context values, and the *ImpersonateInfo (if any) propagated onto the Go
-// request context for downstream RoundTrippers.
-func runMiddleware(mw gin.HandlerFunc, r *http.Request) (*httptest.ResponseRecorder, gin.H, *k8shelpers.ImpersonateInfo) {
-	captured := gin.H{}
+// runMiddleware executes mw against r and returns the recorder plus the
+// *ImpersonateInfo set on the request context (nil if the middleware
+// aborted).
+func runMiddleware(mw gin.HandlerFunc, r *http.Request) (*httptest.ResponseRecorder, *k8shelpers.ImpersonateInfo) {
 	var impersonate *k8shelpers.ImpersonateInfo
 	router := gin.New()
 	router.Use(mw)
 	router.Any("/*any", func(c *gin.Context) {
-		for _, k := range []string{aggUserKey, aggGroupsKey, aggExtrasKey} {
-			if v, ok := c.Get(k); ok {
-				captured[k] = v
-			}
-		}
-		if v, ok := c.Request.Context().Value(k8shelpers.K8SImpersonateCtxKey).(*k8shelpers.ImpersonateInfo); ok {
-			impersonate = v
-		}
+		impersonate, _ = c.Request.Context().Value(k8shelpers.K8SImpersonateCtxKey).(*k8shelpers.ImpersonateInfo)
 		c.String(http.StatusOK, "ok")
 	})
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, r)
-	return w, captured, impersonate
+	return w, impersonate
 }
 
-func TestAggregationAuth_RejectsRequestWithoutPeerCert(t *testing.T) {
-	clientCA := newTestCA(t, "client-ca")
-	proxyCA := newTestCA(t, "proxy-ca")
-
-	mw := newAggregationAuthMiddleware(&aggregationAuthConfig{
+func newTestAuthCfg(clientCA, proxyCA *testCA, allowedNames ...string) *aggregationAuthConfig {
+	return &aggregationAuthConfig{
 		ClientCAs:            clientCA.pool,
 		ProxyCAs:             proxyCA.pool,
+		AllowedNames:         allowedNames,
 		UsernameHeaders:      []string{"X-Remote-User"},
 		GroupHeaders:         []string{"X-Remote-Group"},
 		ExtraHeadersPrefixes: []string{"X-Remote-Extra-"},
-	})
+	}
+}
 
-	w, _, _ := runMiddleware(mw, requestWithCert(nil, nil))
+func TestAggregationAuth_RejectsRequestWithoutPeerCert(t *testing.T) {
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(newTestCA(t, "client-ca"), newTestCA(t, "proxy-ca")))
+	w, _ := runMiddleware(mw, requestWithCert(nil, nil))
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
@@ -151,17 +144,10 @@ func TestAggregationAuth_DirectClientCert(t *testing.T) {
 	proxyCA := newTestCA(t, "proxy-ca")
 	leaf := clientCA.issue(t, "alice")
 
-	mw := newAggregationAuthMiddleware(&aggregationAuthConfig{
-		ClientCAs:            clientCA.pool,
-		ProxyCAs:             proxyCA.pool,
-		UsernameHeaders:      []string{"X-Remote-User"},
-		GroupHeaders:         []string{"X-Remote-Group"},
-		ExtraHeadersPrefixes: []string{"X-Remote-Extra-"},
-	})
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA))
+	w, impersonate := runMiddleware(mw, requestWithCert([]*x509.Certificate{leaf}, nil))
 
-	w, captured, impersonate := runMiddleware(mw, requestWithCert([]*x509.Certificate{leaf}, nil))
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
-	assert.Equal(t, "alice", captured[aggUserKey])
 	require.NotNil(t, impersonate)
 	assert.Equal(t, "alice", impersonate.User)
 	assert.Empty(t, impersonate.Groups)
@@ -172,28 +158,15 @@ func TestAggregationAuth_FrontProxyHeadersExtractIdentity(t *testing.T) {
 	proxyCA := newTestCA(t, "proxy-ca")
 	proxyLeaf := proxyCA.issue(t, "front-proxy-client")
 
-	mw := newAggregationAuthMiddleware(&aggregationAuthConfig{
-		ClientCAs:            clientCA.pool,
-		ProxyCAs:             proxyCA.pool,
-		AllowedNames:         []string{"front-proxy-client"},
-		UsernameHeaders:      []string{"X-Remote-User"},
-		GroupHeaders:         []string{"X-Remote-Group"},
-		ExtraHeadersPrefixes: []string{"X-Remote-Extra-"},
-	})
-
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
 	r := requestWithCert([]*x509.Certificate{proxyLeaf}, map[string]string{
 		"X-Remote-User":         "bob",
 		"X-Remote-Group":        "devs,sre",
 		"X-Remote-Extra-Scopes": "openid",
 	})
-	w, captured, impersonate := runMiddleware(mw, r)
+	w, impersonate := runMiddleware(mw, r)
+
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
-	assert.Equal(t, "bob", captured[aggUserKey])
-	assert.Equal(t, []string{"devs", "sre"}, captured[aggGroupsKey])
-
-	extras, _ := captured[aggExtrasKey].(map[string][]string)
-	assert.Equal(t, []string{"openid"}, extras["Scopes"])
-
 	require.NotNil(t, impersonate)
 	assert.Equal(t, "bob", impersonate.User)
 	assert.Equal(t, []string{"devs", "sre"}, impersonate.Groups)
@@ -205,19 +178,9 @@ func TestAggregationAuth_FrontProxyCNNotAllowed(t *testing.T) {
 	proxyCA := newTestCA(t, "proxy-ca")
 	proxyLeaf := proxyCA.issue(t, "stranger")
 
-	mw := newAggregationAuthMiddleware(&aggregationAuthConfig{
-		ClientCAs:            clientCA.pool,
-		ProxyCAs:             proxyCA.pool,
-		AllowedNames:         []string{"front-proxy-client"},
-		UsernameHeaders:      []string{"X-Remote-User"},
-		GroupHeaders:         []string{"X-Remote-Group"},
-		ExtraHeadersPrefixes: []string{"X-Remote-Extra-"},
-	})
-
-	r := requestWithCert([]*x509.Certificate{proxyLeaf}, map[string]string{
-		"X-Remote-User": "bob",
-	})
-	w, _, _ := runMiddleware(mw, r)
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
+	r := requestWithCert([]*x509.Certificate{proxyLeaf}, map[string]string{"X-Remote-User": "bob"})
+	w, _ := runMiddleware(mw, r)
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
@@ -226,16 +189,8 @@ func TestAggregationAuth_FrontProxyMissingUsernameHeader(t *testing.T) {
 	proxyCA := newTestCA(t, "proxy-ca")
 	proxyLeaf := proxyCA.issue(t, "front-proxy-client")
 
-	mw := newAggregationAuthMiddleware(&aggregationAuthConfig{
-		ClientCAs:            clientCA.pool,
-		ProxyCAs:             proxyCA.pool,
-		AllowedNames:         []string{"front-proxy-client"},
-		UsernameHeaders:      []string{"X-Remote-User"},
-		GroupHeaders:         []string{"X-Remote-Group"},
-		ExtraHeadersPrefixes: []string{"X-Remote-Extra-"},
-	})
-
-	w, _, _ := runMiddleware(mw, requestWithCert([]*x509.Certificate{proxyLeaf}, nil))
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
+	w, _ := runMiddleware(mw, requestWithCert([]*x509.Certificate{proxyLeaf}, nil))
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 

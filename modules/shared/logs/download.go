@@ -177,15 +177,13 @@ func (f DownloadForm) Validate() (*DownloadRequest, *DownloadValidationError) {
 
 // BuildDownloadStreamOptions turns a parsed request into the []Option slice
 // to pass to NewStream. allowedNamespaces, when non-empty, restricts the
-// stream to those namespaces.
-func BuildDownloadStreamOptions(req *DownloadRequest, bearerToken string, allowedNamespaces []string) []Option {
+// stream to those namespaces. Callers append WithBearerToken(...) themselves
+// when their auth model uses one.
+func BuildDownloadStreamOptions(req *DownloadRequest, allowedNamespaces []string) []Option {
 	// Up to ~14 conditional appends below; pre-size to avoid reallocs.
 	opts := make([]Option, 0, 14)
 	if req.Raw.KubeContext != "" {
 		opts = append(opts, WithKubeContext(req.Raw.KubeContext))
-	}
-	if bearerToken != "" {
-		opts = append(opts, WithBearerToken(bearerToken))
 	}
 	if len(allowedNamespaces) > 0 {
 		opts = append(opts, WithAllowedNamespaces(allowedNamespaces))

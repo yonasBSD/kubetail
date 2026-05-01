@@ -74,8 +74,7 @@ func (h *downloadHandlers) DownloadPOST(c *gin.Context) {
 	// rejects outright. Ignore whatever the form carried.
 	req.Raw.KubeContext = ""
 
-	// Bearer token slot is unused under aggregation auth.
-	opts := logs.BuildDownloadStreamOptions(req, "", h.allowedNamespaces)
+	opts := logs.BuildDownloadStreamOptions(req, h.allowedNamespaces)
 	opts = append(opts, logs.WithLogFetcher(logs.NewAgentLogFetcher(h.grpcDispatcher)))
 
 	ctx := c.Request.Context()

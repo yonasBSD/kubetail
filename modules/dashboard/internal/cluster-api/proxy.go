@@ -305,13 +305,9 @@ func (p *InClusterProxy) DrainWithContext(ctx context.Context) error {
 	}
 }
 
-// Create new InClusterProxy with injectable transport (used in tests).
-//
-// The configured endpoint must point at the kube-apiserver — the cluster-api
-// is reached via the v1.api.kubetail.com APIService, so we send the request
-// to the apiserver and let aggregation forward it. The user's bearer token
-// is forwarded as Authorization (the apiserver's expected header), which
-// also drives the front-proxy headers the cluster-api receives.
+// newInClusterProxy creates an InClusterProxy with injectable transport (used in
+// tests). The endpoint must point at the kube-apiserver; aggregation forwards
+// the request to the cluster-api via the v1.api.kubetail.com APIService.
 func newInClusterProxy(kubeAPIServerEndpoint string, pathPrefix string, allowedOrigins []string, transport http.RoundTripper) (*InClusterProxy, error) {
 	endpointUrl, err := url.Parse(kubeAPIServerEndpoint)
 	if err != nil {

@@ -34,6 +34,20 @@ var clientAuthTypes = map[string]tls.ClientAuthType{
 	"require-and-verify": tls.RequireAndVerifyClientCert,
 }
 
+// PoolFromPEM returns an x509.CertPool from the given PEM bytes, or nil
+// when the input is empty. Returns an error if the input contains no valid
+// certificates.
+func PoolFromPEM(pemBytes string) (*x509.CertPool, error) {
+	if pemBytes == "" {
+		return nil, nil
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(pemBytes)) {
+		return nil, fmt.Errorf("no valid PEM certificates")
+	}
+	return pool, nil
+}
+
 // BuildTLSConfig assembles a *tls.Config from the cluster-api TLS settings,
 // or returns nil when TLS is disabled. Cert/key are loaded by the http.Server
 // itself; this only handles MinVersion + mTLS client auth.
@@ -57,9 +71,9 @@ func BuildTLSConfig(cfg *config.Config) (*tls.Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read client-ca-file: %w", err)
 		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("client-ca-file %q contains no valid PEM certificates", cfg.TLS.ClientCAFile)
+		pool, err := PoolFromPEM(string(pem))
+		if err != nil {
+			return nil, fmt.Errorf("client-ca-file %q: %w", cfg.TLS.ClientCAFile, err)
 		}
 		out.ClientCAs = pool
 	}
