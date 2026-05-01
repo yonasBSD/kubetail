@@ -69,14 +69,13 @@ func (h *downloadHandlers) DownloadPOST(c *gin.Context) {
 		return
 	}
 
-	token, _ := c.Request.Context().Value(k8shelpers.K8STokenCtxKey).(string)
-
 	// The cluster-api operates on its in-cluster config; per-request
 	// kubeContext is a dashboard concept that InClusterConnectionManager
 	// rejects outright. Ignore whatever the form carried.
 	req.Raw.KubeContext = ""
 
-	opts := logs.BuildDownloadStreamOptions(req, token, h.allowedNamespaces)
+	// Bearer token slot is unused under aggregation auth.
+	opts := logs.BuildDownloadStreamOptions(req, "", h.allowedNamespaces)
 	opts = append(opts, logs.WithLogFetcher(logs.NewAgentLogFetcher(h.grpcDispatcher)))
 
 	ctx := c.Request.Context()

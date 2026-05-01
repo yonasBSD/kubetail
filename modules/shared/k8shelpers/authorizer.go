@@ -17,6 +17,7 @@ package k8shelpers
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -173,8 +174,16 @@ func NewInClusterAuthorizer() InClusterAuthorizer {
 func (a *DefaultInClusterAuthorizer) IsAllowedInformer(ctx context.Context, restConfig *rest.Config, token string, namespace string, gvr schema.GroupVersionResource) error {
 	tokenTrimmed := strings.TrimSpace(token)
 
-	// For in-cluster authorizer, include token in cache key
-	cacheKeyPrefix := fmt.Sprintf("%s:", tokenTrimmed)
+	// Cache key prefix must distinguish callers so allow/deny answers don't
+	// leak across identities. Under aggregation auth the token is empty and
+	// the caller is identified by the *ImpersonateInfo on ctx; otherwise we
+	// fall back to the legacy bearer-token key.
+	cacheKeyPrefix := fmt.Sprintf("token:%s|", tokenTrimmed)
+	if info, ok := ctx.Value(K8SImpersonateCtxKey).(*ImpersonateInfo); ok && info != nil && info.User != "" {
+		groups := append([]string(nil), info.Groups...)
+		sort.Strings(groups)
+		cacheKeyPrefix = fmt.Sprintf("user:%s|groups:%s|", info.User, strings.Join(groups, ","))
+	}
 
 	// Clone rest config and set bearer token
 	rcClone := *restConfig
