@@ -158,6 +158,11 @@ func NewApp(cfg *config.Config) (*App, error) {
 	}
 	staticFS := http.FS(sub)
 
+	// OpenAPI endpoints (kube-apiserver fetches these once the APIService is aggregated)
+	root.StaticFileFS("/openapi/v2", "/swagger.json", staticFS)
+	root.GET("/openapi/v3", openapiV3IndexHandler)
+	root.GET("/openapi/v3/apis/api.kubetail.com/v1", openapiV3GroupVersionHandler)
+
 	// GraphQL Playground
 	root.StaticFileFS("/graphiql", "/graphiql.html", staticFS)
 
