@@ -32,6 +32,7 @@ import (
 	"github.com/kubetail-org/kubetail/modules/shared/logging"
 
 	"github.com/kubetail-org/kubetail/modules/cluster-api/internal/app"
+	"github.com/kubetail-org/kubetail/modules/cluster-api/internal/helpers"
 	"github.com/kubetail-org/kubetail/modules/cluster-api/pkg/config"
 )
 
@@ -86,6 +87,13 @@ func main() {
 				Format:  cfg.Logging.Format,
 			})
 
+			// Build TLS config (mTLS client-auth + min version) up front so
+			// startup fails fast on a bad client-ca-file.
+			tlsConfig, err := helpers.BuildTLSConfig(cfg)
+			if err != nil {
+				zlog.Fatal().Caller().Err(err).Send()
+			}
+
 			// Create app
 			app, err := app.NewApp(cfg)
 			if err != nil {
@@ -98,6 +106,7 @@ func main() {
 				Handler:     app,
 				IdleTimeout: 1 * time.Minute,
 				ReadTimeout: 5 * time.Second,
+				TLSConfig:   tlsConfig,
 			}
 
 			// Register shutdown hook so long-lived connections are notified before
