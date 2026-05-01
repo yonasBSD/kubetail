@@ -34,6 +34,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
 
 // testCA is a minimal in-memory CA for issuing client certs in tests.
@@ -104,10 +106,12 @@ func requestWithCert(certs []*x509.Certificate, headers map[string]string) *http
 	return r
 }
 
-// runMiddleware executes mw against r and returns the recorder plus the gin
-// context values captured in a downstream handler.
-func runMiddleware(mw gin.HandlerFunc, r *http.Request) (*httptest.ResponseRecorder, gin.H) {
+// runMiddleware executes mw against r and returns the recorder, the gin
+// context values, and the *ImpersonateInfo (if any) propagated onto the Go
+// request context for downstream RoundTrippers.
+func runMiddleware(mw gin.HandlerFunc, r *http.Request) (*httptest.ResponseRecorder, gin.H, *k8shelpers.ImpersonateInfo) {
 	captured := gin.H{}
+	var impersonate *k8shelpers.ImpersonateInfo
 	router := gin.New()
 	router.Use(mw)
 	router.Any("/*any", func(c *gin.Context) {
@@ -116,11 +120,14 @@ func runMiddleware(mw gin.HandlerFunc, r *http.Request) (*httptest.ResponseRecor
 				captured[k] = v
 			}
 		}
+		if v, ok := c.Request.Context().Value(k8shelpers.K8SImpersonateCtxKey).(*k8shelpers.ImpersonateInfo); ok {
+			impersonate = v
+		}
 		c.String(http.StatusOK, "ok")
 	})
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, r)
-	return w, captured
+	return w, captured, impersonate
 }
 
 func TestAggregationAuth_RejectsRequestWithoutPeerCert(t *testing.T) {
@@ -135,7 +142,7 @@ func TestAggregationAuth_RejectsRequestWithoutPeerCert(t *testing.T) {
 		ExtraHeadersPrefixes: []string{"X-Remote-Extra-"},
 	})
 
-	w, _ := runMiddleware(mw, requestWithCert(nil, nil))
+	w, _, _ := runMiddleware(mw, requestWithCert(nil, nil))
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
@@ -152,9 +159,12 @@ func TestAggregationAuth_DirectClientCert(t *testing.T) {
 		ExtraHeadersPrefixes: []string{"X-Remote-Extra-"},
 	})
 
-	w, captured := runMiddleware(mw, requestWithCert([]*x509.Certificate{leaf}, nil))
+	w, captured, impersonate := runMiddleware(mw, requestWithCert([]*x509.Certificate{leaf}, nil))
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
 	assert.Equal(t, "alice", captured[aggUserKey])
+	require.NotNil(t, impersonate)
+	assert.Equal(t, "alice", impersonate.User)
+	assert.Empty(t, impersonate.Groups)
 }
 
 func TestAggregationAuth_FrontProxyHeadersExtractIdentity(t *testing.T) {
@@ -176,13 +186,18 @@ func TestAggregationAuth_FrontProxyHeadersExtractIdentity(t *testing.T) {
 		"X-Remote-Group":        "devs,sre",
 		"X-Remote-Extra-Scopes": "openid",
 	})
-	w, captured := runMiddleware(mw, r)
+	w, captured, impersonate := runMiddleware(mw, r)
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
 	assert.Equal(t, "bob", captured[aggUserKey])
 	assert.Equal(t, []string{"devs", "sre"}, captured[aggGroupsKey])
 
 	extras, _ := captured[aggExtrasKey].(map[string][]string)
 	assert.Equal(t, []string{"openid"}, extras["Scopes"])
+
+	require.NotNil(t, impersonate)
+	assert.Equal(t, "bob", impersonate.User)
+	assert.Equal(t, []string{"devs", "sre"}, impersonate.Groups)
+	assert.Equal(t, []string{"openid"}, impersonate.Extras["Scopes"])
 }
 
 func TestAggregationAuth_FrontProxyCNNotAllowed(t *testing.T) {
@@ -202,7 +217,7 @@ func TestAggregationAuth_FrontProxyCNNotAllowed(t *testing.T) {
 	r := requestWithCert([]*x509.Certificate{proxyLeaf}, map[string]string{
 		"X-Remote-User": "bob",
 	})
-	w, _ := runMiddleware(mw, r)
+	w, _, _ := runMiddleware(mw, r)
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
@@ -220,7 +235,7 @@ func TestAggregationAuth_FrontProxyMissingUsernameHeader(t *testing.T) {
 		ExtraHeadersPrefixes: []string{"X-Remote-Extra-"},
 	})
 
-	w, _ := runMiddleware(mw, requestWithCert([]*x509.Certificate{proxyLeaf}, nil))
+	w, _, _ := runMiddleware(mw, requestWithCert([]*x509.Certificate{proxyLeaf}, nil))
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 

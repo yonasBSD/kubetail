@@ -27,7 +27,17 @@ import (
 	"github.com/gin-gonic/gin"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
+
+// setImpersonateOnRequest writes the authenticated identity to the Go
+// request context so the in-cluster ImpersonatingRoundTripper can attach
+// Impersonate-* headers on each downstream Kubernetes API call.
+func setImpersonateOnRequest(c *gin.Context, info *k8shelpers.ImpersonateInfo) {
+	ctx := context.WithValue(c.Request.Context(), k8shelpers.K8SImpersonateCtxKey, info)
+	c.Request = c.Request.WithContext(ctx)
+}
 
 // gin context keys populated by the aggregation auth middleware. Downstream
 // handlers (impersonation when constructing k8s clients) read these instead
@@ -88,7 +98,9 @@ func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 				CurrentTime: now,
 				KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 			}); err == nil {
-				c.Set(aggUserKey, leaf.Subject.CommonName)
+				user := leaf.Subject.CommonName
+				c.Set(aggUserKey, user)
+				setImpersonateOnRequest(c, &k8shelpers.ImpersonateInfo{User: user})
 				c.Next()
 				return
 			}
@@ -167,6 +179,12 @@ func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 			}
 		}
 		c.Set(aggExtrasKey, extras)
+
+		setImpersonateOnRequest(c, &k8shelpers.ImpersonateInfo{
+			User:   user,
+			Groups: groups,
+			Extras: extras,
+		})
 
 		c.Next()
 	}

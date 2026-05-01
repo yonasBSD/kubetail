@@ -514,9 +514,12 @@ func (cm *InClusterConnectionManager) getOrCreateRestConfig_UNSAFE() (*rest.Conf
 	rc.QPS = 10.0
 	rc.Burst = 40
 
-	// Add authentication middleware
+	// In-cluster the connection authenticates as the cluster-api's own
+	// ServiceAccount; per-request identity is propagated via Impersonate-*
+	// headers (set when the aggregation auth middleware writes
+	// *ImpersonateInfo into the request context).
 	rc.WrapTransport = func(transport http.RoundTripper) http.RoundTripper {
-		return NewBearerTokenRoundTripper(transport)
+		return NewImpersonatingRoundTripper(transport)
 	}
 
 	// Add to cache
