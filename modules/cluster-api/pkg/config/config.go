@@ -28,6 +28,7 @@ import (
 // surface a targeted error instead of silently ignoring them so operators
 // notice the migration. See PR description for the rationale.
 var removedTLSKeys = []string{
+	"cluster-agent.tls.enabled",
 	"tls.client-auth-type",
 	"tls.client-ca-file",
 	"tls.enabled",
@@ -45,10 +46,9 @@ type Config struct {
 	ClusterAgent struct {
 		DispatchUrl string `mapstructure:"dispatch-url"`
 		TLS         struct {
-			Enabled    bool
-			CertFile   string `mapstructure:"cert-file" validate:"omitempty,file"`
-			KeyFile    string `mapstructure:"key-file" validate:"omitempty,file"`
-			CAFile     string `mapstructure:"ca-file" validate:"omitempty,file"`
+			CertFile   string `mapstructure:"cert-file" validate:"required,file"`
+			KeyFile    string `mapstructure:"key-file" validate:"required,file"`
+			CAFile     string `mapstructure:"ca-file" validate:"required,file"`
 			ServerName string `mapstructure:"server-name"`
 		}
 	} `mapstructure:"cluster-agent"`
@@ -84,7 +84,6 @@ func DefaultConfig() *Config {
 	cfg.GinMode = "release"
 
 	cfg.ClusterAgent.DispatchUrl = "kubernetes://kubetail-cluster-agent:50051"
-	cfg.ClusterAgent.TLS.Enabled = false
 	cfg.ClusterAgent.TLS.CertFile = ""
 	cfg.ClusterAgent.TLS.KeyFile = ""
 	cfg.ClusterAgent.TLS.CAFile = ""

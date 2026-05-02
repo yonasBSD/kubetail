@@ -55,7 +55,6 @@ data:
     cluster-agent:
       dispatch-url: kubernetes://kubetail-cluster-agent:50051
       tls:
-        enabled: true
         cert-file: /etc/kubetail/tls.crt
         key-file: /etc/kubetail/tls.key
         ca-file: /etc/kubetail/ca.crt

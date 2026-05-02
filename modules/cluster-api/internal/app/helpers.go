@@ -23,7 +23,6 @@ import (
 	zlog "github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	grpcdispatcher "github.com/kubetail-org/grpc-dispatcher-go"
 
@@ -38,46 +37,33 @@ func healthzHandler(c *gin.Context) {
 }
 
 func mustNewGrpcDispatcher(cfg *config.Config) *grpcdispatcher.Dispatcher {
+	// The cluster-agent strictly requires mTLS, so the cluster-api always
+	// connects with a client cert and verifies the server against the
+	// configured CA. Validation of the file paths happens in config.NewConfig.
+	clientCert, err := tls.LoadX509KeyPair(cfg.ClusterAgent.TLS.CertFile, cfg.ClusterAgent.TLS.KeyFile)
+	if err != nil {
+		zlog.Fatal().Err(err).Send()
+	}
+
+	caPem, err := os.ReadFile(cfg.ClusterAgent.TLS.CAFile)
+	if err != nil {
+		zlog.Fatal().Err(err).Send()
+	}
+	roots, err := helpers.PoolFromPEM(string(caPem))
+	if err != nil {
+		zlog.Fatal().Err(err).Send()
+	}
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		ServerName:   cfg.ClusterAgent.TLS.ServerName,
+		RootCAs:      roots,
+	}
+
 	dialOpts := []grpc.DialOption{
 		grpc.WithUnaryInterceptor(grpchelpers.ImpersonateUnaryClientInterceptor),
 		grpc.WithStreamInterceptor(grpchelpers.ImpersonateStreamClientInterceptor),
-	}
-
-	// configure tls
-	if cfg.ClusterAgent.TLS.Enabled {
-		// Client cert for mTLS
-		clientCert, err := tls.LoadX509KeyPair(cfg.ClusterAgent.TLS.CertFile, cfg.ClusterAgent.TLS.KeyFile)
-		if err != nil {
-			zlog.Fatal().Err(err).Send()
-		}
-
-		// Init tls config
-		tlsCfg := &tls.Config{
-			Certificates: []tls.Certificate{clientCert},
-			ServerName:   cfg.ClusterAgent.TLS.ServerName,
-		}
-
-		if cfg.ClusterAgent.TLS.CAFile != "" {
-			caPem, err := os.ReadFile(cfg.ClusterAgent.TLS.CAFile)
-			if err != nil {
-				zlog.Fatal().Err(err).Send()
-			}
-			roots, err := helpers.PoolFromPEM(string(caPem))
-			if err != nil {
-				zlog.Fatal().Err(err).Send()
-			}
-			tlsCfg.RootCAs = roots
-		} else {
-			// Skip verification
-			tlsCfg.InsecureSkipVerify = true
-		}
-
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
-	} else {
-		dialOpts = append(dialOpts,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithAuthority("kubetail-cluster-agent.kubetail-system.svc"),
-		)
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 	}
 
 	// TODO: reuse app clientset
