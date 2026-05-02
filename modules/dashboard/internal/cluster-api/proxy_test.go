@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -455,6 +456,54 @@ func TestDesktopProxy_DoesNotInjectAuthorizationHeader(t *testing.T) {
 
 	assert.Empty(t, capturedAuth, "kubectl proxy handler attaches Authorization itself; the request reaching it must not carry one")
 	assert.Empty(t, capturedFwd, "X-Forwarded-Authorization must not be forwarded")
+}
+
+func TestDesktopProxy_StripsImpersonationHeaders(t *testing.T) {
+	var captured http.Header
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	proxy, err := NewDesktopProxy(nil, "/prefix", nil)
+	require.NoError(t, err)
+	proxy.phCache["ctx"] = handler
+
+	req := httptest.NewRequest(http.MethodGet, "/prefix/ctx/relpath", nil)
+	req.Header.Set("Impersonate-User", "system:admin")
+	req.Header.Set("Impersonate-Group", "system:masters")
+	req.Header.Set("Impersonate-Uid", "abc")
+	req.Header.Set("Impersonate-Extra-Reason", "testing")
+	proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+	for k := range captured {
+		assert.False(t, strings.HasPrefix(strings.ToLower(k), "impersonate-"),
+			"client-supplied %s must not be forwarded to kube-apiserver", k)
+	}
+}
+
+func TestInClusterProxy_StripsImpersonationHeaders(t *testing.T) {
+	var captured http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	proxy, err := newInClusterProxy(backend.URL, "/prefix", nil, http.DefaultTransport)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/prefix/somepath", nil)
+	req.Header.Set("Impersonate-User", "system:admin")
+	req.Header.Set("Impersonate-Group", "system:masters")
+	req.Header.Set("Impersonate-Uid", "abc")
+	req.Header.Set("Impersonate-Extra-Reason", "testing")
+	proxy.ServeHTTP(httptest.NewRecorder(), req)
+
+	for k := range captured {
+		assert.False(t, strings.HasPrefix(strings.ToLower(k), "impersonate-"),
+			"client-supplied %s must not be forwarded to kube-apiserver", k)
+	}
 }
 
 func TestDesktopProxy_RejectsCrossOriginUpgradeRequest(t *testing.T) {

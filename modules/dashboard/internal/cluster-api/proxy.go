@@ -70,6 +70,18 @@ func (w *hijackTrackingResponseWriter) closeConn() {
 // For parsing paths of the form /:kubeContext/*relPath
 var desktopProxyPathRegex = regexp.MustCompile(`^/([^/]+)/(.*)$`)
 
+// stripImpersonationHeaders removes any client-supplied Impersonate-* headers
+// so a caller can't ask kube-apiserver to act as another user/group. The
+// dashboard SA is not granted impersonate RBAC by default, but stripping
+// here is a belt-and-suspenders defense against future RBAC misconfiguration.
+func stripImpersonationHeaders(h http.Header) {
+	for k := range h {
+		if strings.HasPrefix(strings.ToLower(k), "impersonate-") {
+			h.Del(k)
+		}
+	}
+}
+
 // For parsing cookie paths
 var cookiepathRegex = regexp.MustCompile(`Path=[^;]*`)
 
@@ -144,6 +156,9 @@ func (p *DesktopProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// honored by the cluster-api.
 	r.Header.Del("Authorization")
 	r.Header.Del("X-Forwarded-Authorization")
+
+	// Drop client-supplied Impersonate-* headers — see stripImpersonationHeaders.
+	stripImpersonationHeaders(r.Header)
 
 	// Passthrough upgrade requests, closing the hijacked connection on shutdown
 	if r.Header.Get("Upgrade") != "" {
@@ -332,6 +347,9 @@ func newInClusterProxy(kubeAPIServerEndpoint string, pathPrefix string, allowedO
 			if token, ok := r.Context().Value(k8shelpers.K8STokenCtxKey).(string); ok && token != "" {
 				r.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 			}
+
+			// Drop client-supplied Impersonate-* headers — see stripImpersonationHeaders.
+			stripImpersonationHeaders(r.Header)
 
 			// Strip the browser-supplied Origin so the cluster-api can treat its
 			// presence as a CSWSH signal. Cross-origin browser upgrades are
