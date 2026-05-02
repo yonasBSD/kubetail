@@ -167,11 +167,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 
 	if isLongLived {
-		ctx, cancel := context.WithCancel(r.Context())
+		cancelCtx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 		go func() {
 			select {
-			case <-ctx.Done():
+			case <-cancelCtx.Done():
 			case <-s.shutdownCh:
 				cancel()
 			}
@@ -181,6 +181,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// so the WebSocket InitFunc can distinguish absent (no check) from
 		// present-but-empty (reject). r.Header.Values returns nil when the
 		// header wasn't sent at all.
+		ctx := cancelCtx
 		if r.Header.Get("Upgrade") != "" {
 			if vals := r.Header.Values(httphelpers.HeaderForwardedCSRFToken); vals != nil {
 				v := vals[0]
