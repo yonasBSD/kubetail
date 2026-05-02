@@ -17,8 +17,10 @@ package app
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"net/http"
 	"os"
 
+	"github.com/gin-gonic/gin"
 	zlog "github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -30,6 +32,10 @@ import (
 
 	"github.com/kubetail-org/kubetail/modules/cluster-api/pkg/config"
 )
+
+func healthzHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
 
 func mustNewGrpcDispatcher(cfg *config.Config) *grpcdispatcher.Dispatcher {
 	dialOpts := []grpc.DialOption{

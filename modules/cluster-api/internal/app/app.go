@@ -135,6 +135,10 @@ func NewApp(cfg *config.Config) (*App, error) {
 			dynamicRoutes.Use(newAggregationAuthMiddleware(authCfg))
 		}
 
+		// Mirrored under the aggregated path so the dashboard cluster-api proxy
+		// can reach it; kube-apiserver only forwards /apis/<group>/<version>/...
+		dynamicRoutes.GET("/healthz", healthzHandler)
+
 		// GraphQL endpoint
 		app.graphqlServer = graph.NewServer(app.cm, app.grpcDispatcher, cfg.AllowedNamespaces)
 		dynamicRoutes.Any("/graphql", gin.WrapH(app.graphqlServer))
@@ -151,11 +155,7 @@ func NewApp(cfg *config.Config) (*App, error) {
 	})
 
 	// Health endpoint
-	root.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status": "ok",
-		})
-	})
+	root.GET("/healthz", healthzHandler)
 
 	// Kubernetes API extension discovery endpoints
 	root.GET("/apis", extGroupDiscoveryHandler)

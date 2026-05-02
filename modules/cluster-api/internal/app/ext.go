@@ -55,6 +55,12 @@ func extVersionDiscoveryHandler(c *gin.Context) {
 				Kind:       "Download",
 				Verbs:      []string{"create"},
 			},
+			{
+				Name:       "healthz",
+				Namespaced: false,
+				Kind:       "Healthz",
+				Verbs:      []string{"get", "list"},
+			},
 		},
 	})
 }

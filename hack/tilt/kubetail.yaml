@@ -144,8 +144,14 @@ rules:
   # Lets the dashboard SA call the aggregated cluster-api when no user
   # token is in context (auto-mode fallback in InClusterProxy).
   - apiGroups: [api.kubetail.com]
-    resources: [graphql, download]
-    verbs: [get, create]
+    resources: [graphql]
+    verbs: [get, list, create]
+  - apiGroups: [api.kubetail.com]
+    resources: [download]
+    verbs: [create]
+  - apiGroups: [api.kubetail.com]
+    resources: [healthz]
+    verbs: [get, list]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

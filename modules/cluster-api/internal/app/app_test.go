@@ -106,3 +106,18 @@ func TestHealthz(t *testing.T) {
 	assert.Equal(t, http.StatusOK, result.StatusCode)
 	assert.Equal(t, "{\"status\":\"ok\"}", w.Body.String())
 }
+
+// The dashboard cluster-api proxy rewrites `/cluster-api-proxy/healthz` to
+// `/apis/api.kubetail.com/v1/healthz`, so the health endpoint must also be
+// reachable under the aggregated APIService path.
+func TestHealthzAggregated(t *testing.T) {
+	app := NewTestApp(nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/apis/api.kubetail.com/v1/healthz", nil)
+	app.ServeHTTP(w, r)
+
+	result := w.Result()
+	assert.Equal(t, http.StatusOK, result.StatusCode)
+	assert.Equal(t, "{\"status\":\"ok\"}", w.Body.String())
+}
