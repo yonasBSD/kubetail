@@ -16,12 +16,22 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/spf13/viper"
 )
+
+// removedTLSKeys are config keys we used to honor but no longer accept. We
+// surface a targeted error instead of silently ignoring them so operators
+// notice the migration. See PR description for the rationale.
+var removedTLSKeys = []string{
+	"tls.client-auth-type",
+	"tls.client-ca-file",
+	"tls.enabled",
+}
 
 // Represents the Cluster API configuration
 type Config struct {
@@ -55,11 +65,8 @@ type Config struct {
 	}
 
 	TLS struct {
-		Enabled        bool
-		CertFile       string `mapstructure:"cert-file" validate:"omitempty,file"`
-		KeyFile        string `mapstructure:"key-file" validate:"omitempty,file"`
-		ClientCAFile   string `mapstructure:"client-ca-file" validate:"omitempty,file"`
-		ClientAuthType string `mapstructure:"client-auth-type" validate:"omitempty,oneof=none request require verify-if-given require-and-verify"`
+		CertFile string `mapstructure:"cert-file" validate:"required,file"`
+		KeyFile  string `mapstructure:"key-file" validate:"required,file"`
 	}
 }
 
@@ -89,11 +96,8 @@ func DefaultConfig() *Config {
 	cfg.Logging.AccessLog.Enabled = true
 	cfg.Logging.AccessLog.HideHealthChecks = false
 
-	cfg.TLS.Enabled = false
 	cfg.TLS.CertFile = ""
 	cfg.TLS.KeyFile = ""
-	cfg.TLS.ClientCAFile = ""
-	cfg.TLS.ClientAuthType = ""
 
 	return cfg
 }
@@ -117,6 +121,12 @@ func NewConfig(configPath string, v *viper.Viper) (*Config, error) {
 		v.SetConfigType(filepath.Ext(configPath)[1:])
 		if err := v.ReadConfig(bytes.NewBuffer(configBytes)); err != nil {
 			return nil, err
+		}
+	}
+
+	for _, k := range removedTLSKeys {
+		if v.IsSet(k) {
+			return nil, fmt.Errorf("config key %q (in %s) is no longer supported and must be removed", k, configPath)
 		}
 	}
 

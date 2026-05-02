@@ -16,7 +16,6 @@ package app
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"net/http"
 	"os"
 
@@ -30,6 +29,7 @@ import (
 
 	"github.com/kubetail-org/kubetail/modules/shared/grpchelpers"
 
+	"github.com/kubetail-org/kubetail/modules/cluster-api/internal/helpers"
 	"github.com/kubetail-org/kubetail/modules/cluster-api/pkg/config"
 )
 
@@ -58,13 +58,14 @@ func mustNewGrpcDispatcher(cfg *config.Config) *grpcdispatcher.Dispatcher {
 		}
 
 		if cfg.ClusterAgent.TLS.CAFile != "" {
-			// Root CA for server verification
 			caPem, err := os.ReadFile(cfg.ClusterAgent.TLS.CAFile)
 			if err != nil {
 				zlog.Fatal().Err(err).Send()
 			}
-			roots := x509.NewCertPool()
-			roots.AppendCertsFromPEM(caPem)
+			roots, err := helpers.PoolFromPEM(string(caPem))
+			if err != nil {
+				zlog.Fatal().Err(err).Send()
+			}
 			tlsCfg.RootCAs = roots
 		} else {
 			// Skip verification

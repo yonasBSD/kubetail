@@ -156,30 +156,21 @@ logging:
 
 ## tls ##
 #
-# TLS configuration for the HTTP server
+# TLS configuration for the HTTP server. TLS is always enabled; the listener
+# requests but does not require client certs. The aggregation auth middleware
+# is the actual auth boundary and verifies peer certs against the
+# kube-apiserver's `extension-apiserver-authentication` ConfigMap.
 #
 tls:
 
-  ## enabled ##
-  #
-  # Whether TLS is enabled for HTTP connections.
-  #
-  # Default value: false
-  #
-  enabled: false
-
   ## cert-file ##
   #
-  # Path to the TLS certificate file.
-  #
-  # Default value: ""
+  # Path to the TLS certificate file. Required.
   #
   cert-file: ""
 
   ## key-file ##
   #
-  # Path to the TLS private key file.
-  #
-  # Default value: ""
+  # Path to the TLS private key file. Required.
   #
   key-file: ""

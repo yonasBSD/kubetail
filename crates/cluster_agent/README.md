@@ -29,11 +29,10 @@ The Kubetail Cluster Agent can be configured using a configuration file written 
 | cluser-agent.logging.enabled | bool     | Enable logging                           | true     | stable |
 | cluser-agent.logging.level   | string   | Log level                                | "info"   | stable |
 | cluser-agent.logging.format  | string   | Log format (json, pretty)                | "json"   | stable |
-| cluser-agent.tls.enabled     | bool     | Enable TLS endpoint termination          | false    | stable |
-| cluser-agent.tls.cert-file   | string   | Path to cert file                        | ""       | stable |
-| cluser-agent.tls.key-file    | string   | Path to key file                         | ""       | stable |
-| cluser-agent.tls.ca-file     | string   | Path to client CA bundle file            | ""       | alpha  |
-| cluser-agent.tls.client-auth | string   | Controls client cert authentication      | "none"   | alpha  |
+| cluser-agent.tls.cert-file   | string   | Path to cert file (required)             | ""       | stable |
+| cluser-agent.tls.key-file    | string   | Path to key file (required)              | ""       | stable |
+| cluser-agent.tls.ca-file     | string   | Path to client CA bundle file (required) | ""       | alpha  |
+| cluser-agent.tls.allowed-names | []string | Allowlist of peer-cert CNs (empty = any) | []       | alpha  |
 
 ## gRPC
 

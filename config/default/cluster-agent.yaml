@@ -55,50 +55,28 @@ logging:
 
 ## tls ##
 #
-# TLS configuration for secure gRPC connections
+# TLS configuration for secure gRPC connections. TLS is mandatory; the listener
+# requires and verifies a client cert chained to `ca-file`.
 #
 tls:
 
-  ## enabled ##
-  #
-  # Whether TLS is enabled for gRPC connections.
-  #
-  # Default value: false
-  #
-  enabled: false
-
   ## cert-file ##
   #
-  # Path to the TLS certificate file.
-  #
-  # Default value: ""
+  # Path to the TLS certificate file. Required.
   #
   cert-file: ""
 
   ## key-file ##
   #
-  # Path to the TLS private key file.
-  #
-  # Default value: ""
+  # Path to the TLS private key file. Required.
   #
   key-file: ""
 
   ## ca-file ##
   #
-  # Path to the CA certificate file for client verification.
-  #
-  # Default value: ""
+  # Path to the CA certificate file used to verify client certs. Required.
   #
   ca-file: ""
-
-  ## client-auth ##
-  #
-  # The client authentication policy for TLS connections.
-  # Valid values: none, request, require, verify, require-and-verify
-  #
-  # Default value: none
-  #
-  client-auth: none
 
   ## allowed-names ##
   #

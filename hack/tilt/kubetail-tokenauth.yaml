@@ -91,11 +91,9 @@ data:
       level: info
       format: pretty
     tls:
-      enabled: true
       cert-file: /etc/kubetail/tls.crt
       key-file: /etc/kubetail/tls.key
       ca-file: /etc/kubetail/ca.crt
-      client-auth: require-and-verify
 ---
 kind: ServiceAccount
 apiVersion: v1

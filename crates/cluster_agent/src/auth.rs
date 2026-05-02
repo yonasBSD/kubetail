@@ -14,8 +14,12 @@
 
 //! Trust-chain authenticator: validates the peer certificate's CN against an
 //! allowlist and extracts the forwarded identity (user/groups/extras) from
-//! gRPC metadata. Mirrors the front-proxy behavior in cluster-api's
-//! `newAggregationAuthMiddleware`.
+//! gRPC metadata.
+//!
+//! The TLS layer is configured for require-and-verify against the operator's
+//! CA, so by the time a request reaches this interceptor the peer cert has
+//! already been chained. The `MissingPeerCert` rejection is belt-and-suspenders
+//! against a future regression that would weaken the listener.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;

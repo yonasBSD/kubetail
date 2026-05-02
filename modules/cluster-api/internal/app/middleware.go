@@ -62,9 +62,9 @@ func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		r := c.Request
 
-		// Defense-in-depth: the listener already enforces mTLS, but a
-		// misconfiguration that left ClientAuth=RequestClientCert (request,
-		// don't require) could still let a connection through without a cert.
+		// The listener is fixed at RequestClientCert so probes and discovery
+		// routes can complete a handshake without a cert; this middleware is
+		// the actual enforcement point that a peer cert is present.
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "client certificate required"})
 			return

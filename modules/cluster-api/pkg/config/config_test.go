@@ -32,34 +32,44 @@ func writeConfig(t *testing.T, body string) string {
 	return path
 }
 
-func TestDefaultMTLSFields(t *testing.T) {
-	cfg := DefaultConfig()
-	assert.Equal(t, "", cfg.TLS.ClientCAFile)
-	assert.Equal(t, "", cfg.TLS.ClientAuthType)
-}
-
-func TestLoadMTLSFields(t *testing.T) {
-	// Write a CA file so client-ca-file passes the `file` validator.
+func TestRejectsRemovedTLSFields(t *testing.T) {
 	dir := t.TempDir()
-	caPath := filepath.Join(dir, "ca.pem")
-	require.NoError(t, os.WriteFile(caPath, []byte("dummy"), 0o600))
+	dummy := filepath.Join(dir, "dummy.pem")
+	require.NoError(t, os.WriteFile(dummy, []byte("dummy"), 0o600))
 
-	path := writeConfig(t, `
-tls:
-  client-ca-file: `+caPath+`
-  client-auth-type: require-and-verify
-`)
-	cfg, err := NewConfig(path, viper.New())
-	require.NoError(t, err)
-	assert.Equal(t, caPath, cfg.TLS.ClientCAFile)
-	assert.Equal(t, "require-and-verify", cfg.TLS.ClientAuthType)
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"client-ca-file", "tls:\n  client-ca-file: " + dummy + "\n"},
+		{"enabled", "tls:\n  enabled: false\n"},
+		{"client-auth-type", "tls:\n  client-auth-type: require-and-verify\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewConfig(writeConfig(t, tc.body), viper.New())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.name)
+		})
+	}
 }
 
-func TestRejectsInvalidClientAuthType(t *testing.T) {
-	path := writeConfig(t, `
-tls:
-  client-auth-type: bogus
-`)
-	_, err := NewConfig(path, viper.New())
-	require.Error(t, err)
+func TestRequiresCertAndKey(t *testing.T) {
+	dir := t.TempDir()
+	dummy := filepath.Join(dir, "dummy.pem")
+	require.NoError(t, os.WriteFile(dummy, []byte("dummy"), 0o600))
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"missing key-file", "tls:\n  cert-file: " + dummy + "\n"},
+		{"missing cert-file", "tls:\n  key-file: " + dummy + "\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewConfig(writeConfig(t, tc.body), viper.New())
+			require.Error(t, err)
+		})
+	}
 }

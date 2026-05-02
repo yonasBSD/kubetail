@@ -18,21 +18,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"os"
-
-	"github.com/kubetail-org/kubetail/modules/cluster-api/pkg/config"
 )
-
-// clientAuthTypes maps the validated config strings to the crypto/tls
-// constants. Keep in sync with the `oneof` validator on Config.TLS.ClientAuthType.
-var clientAuthTypes = map[string]tls.ClientAuthType{
-	"":                   tls.NoClientCert,
-	"none":               tls.NoClientCert,
-	"request":            tls.RequestClientCert,
-	"require":            tls.RequireAnyClientCert,
-	"verify-if-given":    tls.VerifyClientCertIfGiven,
-	"require-and-verify": tls.RequireAndVerifyClientCert,
-}
 
 // PoolFromPEM returns an x509.CertPool from the given PEM bytes, or nil
 // when the input is empty. Returns an error if the input contains no valid
@@ -48,35 +34,15 @@ func PoolFromPEM(pemBytes string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// BuildTLSConfig assembles a *tls.Config from the cluster-api TLS settings,
-// or returns nil when TLS is disabled. Cert/key are loaded by the http.Server
-// itself; this only handles MinVersion + mTLS client auth.
-func BuildTLSConfig(cfg *config.Config) (*tls.Config, error) {
-	if !cfg.TLS.Enabled {
-		return nil, nil
-	}
-
-	clientAuth, ok := clientAuthTypes[cfg.TLS.ClientAuthType]
-	if !ok {
-		return nil, fmt.Errorf("unknown client-auth-type %q", cfg.TLS.ClientAuthType)
-	}
-
-	out := &tls.Config{
+// BuildTLSConfig assembles the *tls.Config for the cluster-api HTTP server.
+// The listener is fixed at RequestClientCert: it collects peer certs when
+// presented (so the aggregation auth middleware can verify them against the
+// kube-apiserver's CAs) but doesn't reject connections without one — kubelet
+// probes and pre-auth discovery routes share the listener. Cert/key are
+// loaded by http.Server itself.
+func BuildTLSConfig() *tls.Config {
+	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		ClientAuth: clientAuth,
+		ClientAuth: tls.RequestClientCert,
 	}
-
-	if cfg.TLS.ClientCAFile != "" {
-		pem, err := os.ReadFile(cfg.TLS.ClientCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read client-ca-file: %w", err)
-		}
-		pool, err := PoolFromPEM(string(pem))
-		if err != nil {
-			return nil, fmt.Errorf("client-ca-file %q: %w", cfg.TLS.ClientCAFile, err)
-		}
-		out.ClientCAs = pool
-	}
-
-	return out, nil
 }

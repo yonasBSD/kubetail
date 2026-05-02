@@ -68,13 +68,8 @@ data:
         enabled: true
         hide-health-checks: true
     tls:
-      enabled: true
       cert-file: /etc/kubetail/tls.crt
       key-file: /etc/kubetail/tls.key
-      # Listener requests but does not require client certs; the middleware
-      # validates them against the kube-apiserver's client/proxy CAs from the
-      # extension-apiserver-authentication ConfigMap.
-      client-auth-type: request
 ---
 kind: ConfigMap
 apiVersion: v1
@@ -93,11 +88,9 @@ data:
       level: info
       format: pretty
     tls:
-      enabled: true
       cert-file: /etc/kubetail/tls.crt
       key-file: /etc/kubetail/tls.key
       ca-file: /etc/kubetail/ca.crt
-      client-auth: require-and-verify
       # Only accept forwarded identity from cluster-api. Anything else with a
       # cert signed by the shared kubetail-ca passes the TLS handshake but is
       # rejected by the trust-chain interceptor before authorization.

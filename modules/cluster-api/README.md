@@ -36,9 +36,8 @@ The Kubetail Cluster API executable can be configured using a configuration file
 | cluster-api.logging.format                        | string   | Log format (json, pretty)                          | "json"                                      | stable |
 | cluster-api.logging.access-log.enabled            | bool     | Enable access log                                  | true                                        | stable |
 | cluster-api.logging.access-log.hide-health-checks | bool     | Hide requests to /healthz from access log          | false                                       | stable |
-| cluster-api.tls.enabled                           | bool     | Enable tls                                         | false                                       | stable |
-| cluster-api.tls.cert-file                         | string   | Path to tls certificate file                       | ""                                          | stable |
-| cluster-api.tls.key-file                          | string   | Path to tls key file                               | ""                                          | stable |  
+| cluster-api.tls.cert-file                         | string   | Path to tls certificate file (required)            | ""                                          | stable |
+| cluster-api.tls.key-file                          | string   | Path to tls key file (required)                    | ""                                          | stable |  
 
 ## GraphQL
 

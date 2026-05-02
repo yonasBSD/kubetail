@@ -184,6 +184,20 @@ func TestAggregationAuth_FrontProxyCNNotAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
+func TestAggregationAuth_RejectsCertFromUntrustedCA(t *testing.T) {
+	clientCA := newTestCA(t, "client-ca")
+	proxyCA := newTestCA(t, "proxy-ca")
+	untrustedCA := newTestCA(t, "untrusted-ca")
+	leaf := untrustedCA.issue(t, "alice")
+
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
+	r := requestWithCert([]*x509.Certificate{leaf}, map[string]string{"X-Remote-User": "alice"})
+	w, impersonate := runMiddleware(mw, r)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
+	assert.Nil(t, impersonate)
+}
+
 func TestAggregationAuth_FrontProxyMissingUsernameHeader(t *testing.T) {
 	clientCA := newTestCA(t, "client-ca")
 	proxyCA := newTestCA(t, "proxy-ca")
