@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/rest"
 
+	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
 
@@ -109,6 +110,7 @@ func TestInClusterProxy_AllowedOriginsAcceptsCrossHostUpgrade(t *testing.T) {
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Origin", "https://allowed.example.com")
+	req.Header.Set(httphelpers.HeaderForwardedCSRFToken, "test-csrf")
 
 	rec := httptest.NewRecorder()
 	proxy.ServeHTTP(rec, req)
@@ -310,9 +312,14 @@ func newWSBackend(t *testing.T) (*httptest.Server, <-chan struct{}) {
 }
 
 // wsOriginHeader returns an Origin header matching the given server URL, so
-// a WebSocket dial passes the proxy's same-origin gate.
+// a WebSocket dial passes the proxy's same-origin gate. It also stamps a
+// non-empty X-Forwarded-CSRF-Token to satisfy the proxy's session-presence
+// check (normally set by websocketCSRFContextMiddleware upstream).
 func wsOriginHeader(serverURL string) http.Header {
-	return http.Header{"Origin": []string{serverURL}}
+	return http.Header{
+		"Origin":                             []string{serverURL},
+		httphelpers.HeaderForwardedCSRFToken: []string{"test-csrf"},
+	}
 }
 
 // waitConnected waits for the backend to accept a connection or fails the test.
@@ -558,6 +565,7 @@ func TestDesktopProxy_AllowedOriginsAcceptsCrossHostUpgrade(t *testing.T) {
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Origin", "https://allowed.example.com")
+	req.Header.Set(httphelpers.HeaderForwardedCSRFToken, "test-csrf")
 
 	rec := httptest.NewRecorder()
 	proxy.ServeHTTP(rec, req)

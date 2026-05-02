@@ -70,6 +70,26 @@ func (w *hijackTrackingResponseWriter) closeConn() {
 // For parsing paths of the form /:kubeContext/*relPath
 var desktopProxyPathRegex = regexp.MustCompile(`^/([^/]+)/(.*)$`)
 
+// rejectForbiddenUpgrade enforces the dashboard's CSWSH defenses on a
+// WebSocket upgrade request. Returns true (and writes a 403) when the
+// request is forbidden; non-upgrade requests pass through.
+//
+// Two checks: (1) Origin must be same-origin or allowlisted — Chrome omits
+// Sec-Fetch-Site on upgrades, so the app-level CSRF middleware can't gate
+// them. (2) X-Forwarded-CSRF-Token must be present — websocketCSRFContextMiddleware
+// strips client-supplied values and re-stamps only when the session has a
+// CSRF token, so absence here means a session-less browser request.
+func rejectForbiddenUpgrade(w http.ResponseWriter, r *http.Request, allowedOrigins []string) bool {
+	if r.Header.Get("Upgrade") == "" {
+		return false
+	}
+	if !httphelpers.IsAllowedOrigin(r, allowedOrigins) || r.Header.Get(httphelpers.HeaderForwardedCSRFToken) == "" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
+	}
+	return false
+}
+
 // stripImpersonationHeaders removes any client-supplied Impersonate-* headers
 // so a caller can't ask kube-apiserver to act as another user/group. The
 // dashboard SA is not granted impersonate RBAC by default, but stripping
@@ -109,11 +129,7 @@ func (p *DesktopProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.wg.Add(1)
 	defer p.wg.Done()
 
-	// CSWSH defense for WebSocket upgrades. Chrome does not send
-	// Sec-Fetch-Site on upgrade requests, so the app-level CSRF middleware
-	// can't gate them; check Origin directly here instead.
-	if r.Header.Get("Upgrade") != "" && !httphelpers.IsAllowedOrigin(r, p.allowedOrigins) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if rejectForbiddenUpgrade(w, r, p.allowedOrigins) {
 		return
 	}
 
@@ -271,11 +287,7 @@ func (p *InClusterProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.wg.Add(1)
 	defer p.wg.Done()
 
-	// CSWSH defense for WebSocket upgrades. Chrome does not send
-	// Sec-Fetch-Site on upgrade requests, so the app-level CSRF middleware
-	// can't gate them; check Origin directly here instead.
-	if r.Header.Get("Upgrade") != "" && !httphelpers.IsAllowedOrigin(r, p.allowedOrigins) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if rejectForbiddenUpgrade(w, r, p.allowedOrigins) {
 		return
 	}
 
