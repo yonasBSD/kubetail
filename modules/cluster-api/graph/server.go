@@ -16,6 +16,8 @@ package graph
 
 import (
 	"context"
+	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -31,7 +33,20 @@ import (
 	grpcdispatcher "github.com/kubetail-org/grpc-dispatcher-go"
 
 	"github.com/kubetail-org/kubetail/modules/shared/graphql/directives"
+	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
+)
+
+// ctxKey is a private type for keys defined in this package.
+type ctxKey int
+
+const (
+	// forwardedCSRFTokenCtxKey holds a *string of the X-Forwarded-CSRF-Token
+	// header value from the WebSocket upgrade request. nil means the header
+	// was absent (non-browser caller); a non-nil value (including "") means
+	// it was present and the InitFunc must enforce a matching csrfToken in
+	// the connection_init payload.
+	forwardedCSRFTokenCtxKey ctxKey = iota
 )
 
 // Represents Server
@@ -76,8 +91,11 @@ func NewServer(cm k8shelpers.ConnectionManager, grpcDispatcher *grpcdispatcher.D
 	// speak mTLS to us, so CSWSH-from-browser is structurally impossible.
 	// The Origin gate stays as cheap belt-and-suspenders.
 	//
-	// TODO: revisit once the dashboard terminates browser WebSockets at its
-	// own layer and shuttles between the browser and the cluster-api.
+	// When the upgrade request carries X-Forwarded-CSRF-Token (set by the
+	// dashboard's websocketCSRFContextMiddleware for browser-originated
+	// upgrades), require a matching csrfToken in the connection_init
+	// payload. Absent header means a non-browser caller and no check is
+	// performed.
 	h.AddTransport(&transport.Websocket{
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -86,6 +104,18 @@ func NewServer(cm k8shelpers.ConnectionManager, grpcDispatcher *grpcdispatcher.D
 			ReadBufferSize:    1024,
 			WriteBufferSize:   1024,
 			EnableCompression: false,
+		},
+		InitFunc: func(ctx context.Context, initPayload transport.InitPayload) (context.Context, *transport.InitPayload, error) {
+			expectedPtr, _ := ctx.Value(forwardedCSRFTokenCtxKey).(*string)
+			if expectedPtr == nil {
+				return ctx, nil, nil
+			}
+			expected := strings.TrimSpace(*expectedPtr)
+			got := strings.TrimSpace(initPayload.GetString("csrfToken"))
+			if expected == "" || got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+				return ctx, nil, errors.New("invalid CSRF token")
+			}
+			return ctx, nil, nil
 		},
 		KeepAlivePingInterval: 10 * time.Second,
 	})
@@ -146,6 +176,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				cancel()
 			}
 		}()
+
+		// Stash X-Forwarded-CSRF-Token presence (not just value) into context
+		// so the WebSocket InitFunc can distinguish absent (no check) from
+		// present-but-empty (reject). r.Header.Values returns nil when the
+		// header wasn't sent at all.
+		if r.Header.Get("Upgrade") != "" {
+			if vals := r.Header.Values(httphelpers.HeaderForwardedCSRFToken); vals != nil {
+				v := vals[0]
+				ctx = context.WithValue(ctx, forwardedCSRFTokenCtxKey, &v)
+			}
+		}
+
 		r = r.WithContext(ctx)
 	}
 

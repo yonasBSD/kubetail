@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
 	"github.com/kubetail-org/kubetail/modules/shared/testutils"
 )
 
@@ -78,6 +79,94 @@ func TestServerWebSocketCheckOrigin(t *testing.T) {
 			_, resp, _ := websocket.DefaultDialer.Dial(u, tt.setHeader)
 
 			require.Equal(t, tt.wantStatus, resp.StatusCode)
+		})
+	}
+}
+
+func TestServerWebSocketCSRFInit(t *testing.T) {
+	const expected = "expected-csrf-token"
+
+	tests := []struct {
+		name    string
+		headers http.Header
+		payload map[string]any
+		wantAck bool
+	}{
+		{
+			name:    "header absent, payload missing csrfToken — accepted (no check)",
+			headers: http.Header{},
+			payload: map[string]any{"type": "connection_init"},
+			wantAck: true,
+		},
+		{
+			name:    "header absent, payload csrfToken present — accepted (no check)",
+			headers: http.Header{},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": "anything"}},
+			wantAck: true,
+		},
+		{
+			name:    "header present empty — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{""}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": ""}},
+		},
+		{
+			name:    "header present whitespace only — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{"   "}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": "   "}},
+		},
+		{
+			name:    "header present, payload missing csrfToken — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{expected}},
+			payload: map[string]any{"type": "connection_init"},
+		},
+		{
+			name:    "header present, payload csrfToken empty — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{expected}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": ""}},
+		},
+		{
+			name:    "header present, payload mismatched — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{expected}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": "wrong"}},
+		},
+		{
+			name:    "header present, payload matches — accepted",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{expected}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": expected}},
+			wantAck: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewServer(nil, nil, []string{})
+			client := testutils.NewWebTestClient(t, s)
+			defer client.Teardown()
+
+			wsURL := "ws" + strings.TrimPrefix(client.Server.URL, "http") + "/graphql"
+			dialer := websocket.Dialer{Subprotocols: []string{"graphql-transport-ws"}}
+
+			conn, _, err := dialer.Dial(wsURL, tt.headers)
+			require.NoError(t, err)
+			defer conn.Close()
+
+			require.NoError(t, conn.WriteJSON(tt.payload))
+
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			var msg map[string]any
+			err = conn.ReadJSON(&msg)
+			if tt.wantAck {
+				require.NoError(t, err)
+				require.Equal(t, "connection_ack", msg["type"])
+				return
+			}
+			// Reject path: server may emit connection_error then close, or close directly — either way no ack.
+			if err == nil {
+				require.NotEqual(t, "connection_ack", msg["type"])
+				conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+				_, _, err = conn.ReadMessage()
+			}
+			require.Error(t, err)
 		})
 	}
 }
