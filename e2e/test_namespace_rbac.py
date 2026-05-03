@@ -174,6 +174,8 @@ class TestCliDashboard:
             _DASHBOARD_LOG_FETCH, {"sources": [f"{namespace}:pods/chatter"]},
         )
         assert has_authz_denial(body) == expect_denial, body
+        if expect_denial:
+            assert graphql_field(body, "logRecordsFetch") is None, body
 
 
 class TestCliApiProxy:
@@ -207,6 +209,8 @@ class TestClusterDashboard:
             bearer=restricted_sa_tokens[SA1_NS],
         )
         assert has_authz_denial(body) == expect_denial, body
+        if expect_denial:
+            assert graphql_field(body, "logRecordsFetch") is None, body
 
 
 class TestClusterApiProxy:
@@ -222,6 +226,19 @@ class TestClusterApiProxy:
             bearer=restricted_sa_tokens[SA1_NS],
         )
         assert has_authz_denial(body) == expect_denial, body
+
+    @_NAMESPACE_CASES
+    def test_log_records_fetch(
+        self, target_url, restricted_sa_tokens, namespace, expect_denial
+    ):
+        body = _post_graphql(
+            target_url, "/cluster-api-proxy/graphql",
+            _DASHBOARD_LOG_FETCH, {"sources": [f"{namespace}:pods/chatter"]},
+            bearer=restricted_sa_tokens[SA1_NS],
+        )
+        assert has_authz_denial(body) == expect_denial, body
+        if expect_denial:
+            assert graphql_field(body, "logRecordsFetch") is None, body
 
     @pytest.mark.parametrize(
         "token_ns,query_ns,expect_denial",

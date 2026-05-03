@@ -683,6 +683,46 @@ func TestInClusterAuthorizer_IsAllowedInformer_CachePerImpersonatedIdentity(t *t
 	assert.Greater(t, postBob, preBob, "bob must miss alice's cache and re-issue SSARs")
 }
 
+// Extras are forwarded to kube-apiserver and can be consumed by webhook
+// authorizers. Cache keys must include them so an allow decision for one
+// credential/extras set cannot bleed into another request with the same
+// user and groups but different authentication extras.
+func TestInClusterAuthorizer_IsAllowedInformer_CachePerImpersonatedExtras(t *testing.T) {
+	setNamespace := "test-namespace"
+	setGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+
+	clientset := fake.NewSimpleClientset()
+	clientset.Fake.PrependReactor("create", "selfsubjectaccessreviews", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, &authorizationv1.SelfSubjectAccessReview{
+			Status: authorizationv1.SubjectAccessReviewStatus{Allowed: true},
+		}, nil
+	})
+
+	mockInit := new(MockClientsetInitializer)
+	mockInit.On("newClientset", mock.Anything).Return(clientset, nil)
+	authorizer := &DefaultInClusterAuthorizer{
+		clientsetInitializer: mockInit,
+		cache:                util.SyncMap[string, cacheValue]{},
+	}
+
+	ctxCredentialA := context.WithValue(context.Background(), K8SImpersonateCtxKey, &ImpersonateInfo{
+		User:   "alice",
+		Groups: []string{"devs"},
+		Extras: map[string][]string{"authentication.kubernetes.io/credential-id": {"cred-a"}},
+	})
+	ctxCredentialB := context.WithValue(context.Background(), K8SImpersonateCtxKey, &ImpersonateInfo{
+		User:   "alice",
+		Groups: []string{"devs"},
+		Extras: map[string][]string{"authentication.kubernetes.io/credential-id": {"cred-b"}},
+	})
+
+	assert.NoError(t, authorizer.IsAllowedInformer(ctxCredentialA, &rest.Config{}, "", setNamespace, setGVR))
+	preCredentialB := len(clientset.Fake.Actions())
+	assert.NoError(t, authorizer.IsAllowedInformer(ctxCredentialB, &rest.Config{}, "", setNamespace, setGVR))
+	postCredentialB := len(clientset.Fake.Actions())
+	assert.Greater(t, postCredentialB, preCredentialB, "different extras must miss the cache and re-issue SSARs")
+}
+
 func TestInClusterAuthorizer_IsAllowedInformer_Success(t *testing.T) {
 	setNamespace := "test-namespace"
 	setGVR := schema.GroupVersionResource{

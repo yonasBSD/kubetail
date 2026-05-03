@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -170,6 +171,40 @@ func NewInClusterAuthorizer() InClusterAuthorizer {
 	}
 }
 
+func impersonateCacheKeyPrefix(info *ImpersonateInfo) string {
+	groups := append([]string(nil), info.Groups...)
+	sort.Strings(groups)
+
+	var b strings.Builder
+	b.WriteString("user:")
+	b.WriteString(strconv.Quote(info.User))
+	b.WriteString("|groups:")
+	for _, group := range groups {
+		b.WriteString(strconv.Quote(group))
+		b.WriteByte(',')
+	}
+
+	extraKeys := make([]string, 0, len(info.Extras))
+	for key := range info.Extras {
+		extraKeys = append(extraKeys, key)
+	}
+	sort.Strings(extraKeys)
+	for _, key := range extraKeys {
+		values := append([]string(nil), info.Extras[key]...)
+		sort.Strings(values)
+		b.WriteString("|extra:")
+		b.WriteString(strconv.Quote(key))
+		b.WriteByte('=')
+		for _, value := range values {
+			b.WriteString(strconv.Quote(value))
+			b.WriteByte(',')
+		}
+	}
+	b.WriteByte('|')
+
+	return b.String()
+}
+
 // Check permission for creating new informers
 func (a *DefaultInClusterAuthorizer) IsAllowedInformer(ctx context.Context, restConfig *rest.Config, token string, namespace string, gvr schema.GroupVersionResource) error {
 	tokenTrimmed := strings.TrimSpace(token)
@@ -180,9 +215,7 @@ func (a *DefaultInClusterAuthorizer) IsAllowedInformer(ctx context.Context, rest
 	// fall back to the legacy bearer-token key.
 	cacheKeyPrefix := fmt.Sprintf("token:%s|", tokenTrimmed)
 	if info, ok := ctx.Value(K8SImpersonateCtxKey).(*ImpersonateInfo); ok && info != nil && info.User != "" {
-		groups := append([]string(nil), info.Groups...)
-		sort.Strings(groups)
-		cacheKeyPrefix = fmt.Sprintf("user:%s|groups:%s|", info.User, strings.Join(groups, ","))
+		cacheKeyPrefix = impersonateCacheKeyPrefix(info)
 	}
 
 	// Clone rest config and set bearer token
