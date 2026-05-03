@@ -29,9 +29,14 @@ MANIFEST="$SCRIPT_DIR/../manifests/${BACKEND}.yaml.tmpl"
 PID_FILE="/tmp/kubetail-e2e-pf.pid"
 
 # Create cluster if it doesn't exist
+K3D_CREATE_ARGS=()
+if [ -n "${K3S_IMAGE:-}" ]; then
+  K3D_CREATE_ARGS+=(--image "$K3S_IMAGE")
+fi
+
 if ! k3d cluster list 2>/dev/null | grep -q "^$CLUSTER_NAME"; then
-  echo "Creating k3d cluster: $CLUSTER_NAME"
-  k3d cluster create "$CLUSTER_NAME"
+  echo "Creating k3d cluster: $CLUSTER_NAME${K3S_IMAGE:+ (image: $K3S_IMAGE)}"
+  k3d cluster create "$CLUSTER_NAME" "${K3D_CREATE_ARGS[@]}"
 else
   echo "Cluster $CLUSTER_NAME already exists, reusing."
 fi

@@ -455,8 +455,20 @@ jobs:
           ./bin/kubetail serve --test
 
   e2e:
-    name: E2E
+    name: E2E (k8s ${{ matrix.k8s-version }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - k8s-version: "1.17"
+            k3s-image: "rancher/k3s:v1.17.17-k3s1"
+          - k8s-version: "1.21"
+            k3s-image: "rancher/k3s:v1.21.14-k3s1"
+          - k8s-version: "1.25"
+            k3s-image: "rancher/k3s:v1.25.16-k3s4"
+          - k8s-version: "latest"
+            k3s-image: ""
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-environment
@@ -472,4 +484,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Run e2e tests
+        env:
+          K3S_IMAGE: ${{ matrix.k3s-image }}
         run: make test-e2e
