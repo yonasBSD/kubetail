@@ -14,6 +14,8 @@ Monorepo with a TypeScript+React frontend, Go backends, and Rust in-cluster comp
 
 GraphQL for user-facing APIs, gRPC + Protocol Buffers for inter-service communication.
 
+The Cluster API is exposed to the Dashboard as a Kubernetes APIService (aggregation layer): the Dashboard's `/cluster-api-proxy/*` route forwards to the kube-apiserver, which routes to the cluster-api Service via the registered APIService. This applies in both desktop and in-cluster modes — the Dashboard never dials the cluster-api directly. Authentication is handled by kube-apiserver (user's kubeconfig credentials in desktop mode; the Dashboard's ServiceAccount, or a session bearer token if set, in-cluster). The TLS leg is kube-apiserver ↔ cluster-api, configured via the APIService and the `kubetail-cluster-api-tls` / `kubetail-ca` secrets.
+
 ## Project Structure
 
 ```
