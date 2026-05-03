@@ -159,11 +159,12 @@ func TestAggregationAuth_FrontProxyHeadersExtractIdentity(t *testing.T) {
 	proxyLeaf := proxyCA.issue(t, "front-proxy-client")
 
 	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
-	r := requestWithCert([]*x509.Certificate{proxyLeaf}, map[string]string{
-		"X-Remote-User":         "bob",
-		"X-Remote-Group":        "devs,sre",
-		"X-Remote-Extra-Scopes": "openid",
-	})
+	r := requestWithCert([]*x509.Certificate{proxyLeaf}, nil)
+	r.Header.Set("X-Remote-User", "bob")
+	// kube-apiserver emits one X-Remote-Group header per group (Add, not Set).
+	r.Header.Add("X-Remote-Group", "devs")
+	r.Header.Add("X-Remote-Group", "sre")
+	r.Header.Set("X-Remote-Extra-Scopes", "openid")
 	w, impersonate := runMiddleware(mw, r)
 
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)

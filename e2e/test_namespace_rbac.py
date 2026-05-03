@@ -31,6 +31,7 @@ import pytest
 import requests
 
 from _namespace_rbac import (
+    GROUP_NS,
     SA1_NAME,
     SA1_NS,
     SA2_NS,
@@ -243,6 +244,27 @@ class TestClusterApiProxy:
         body = _post_graphql(
             target_url, "/cluster-api-proxy/graphql",
             _CLUSTER_API_LOG_METADATA, {"namespace": query_ns},
+            bearer=restricted_sa_tokens[token_ns],
+        )
+        assert has_authz_denial(body) == expect_denial, body
+
+    @pytest.mark.parametrize(
+        "token_ns,expect_denial",
+        [(GROUP_NS, False), (SA1_NS, True)],
+        ids=["group-sa-allowed", "non-member-sa-denied"],
+    )
+    def test_group_bound_access(
+        self, target_url, restricted_sa_tokens, token_ns, expect_denial,
+    ):
+        """pods/log in GROUP_NS is bound to Group `system:serviceaccounts:
+        GROUP_NS`. The group-bound SA (lives in GROUP_NS, no other RBAC) is a
+        member -> allowed. SA1 (lives in SA1_NS) is not a member -> denied.
+        Proves group identity threads through kube-apiserver -> cluster-api
+        front-proxy headers -> cluster-agent SAR and is honored, not silently
+        dropped."""
+        body = _post_graphql(
+            target_url, "/cluster-api-proxy/graphql",
+            _CLUSTER_API_LOG_METADATA, {"namespace": GROUP_NS},
             bearer=restricted_sa_tokens[token_ns],
         )
         assert has_authz_denial(body) == expect_denial, body

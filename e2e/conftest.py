@@ -157,6 +157,8 @@ def restricted_sa_tokens(_backend):
     """
     from _namespace_rbac import (
         BASELINE_CLUSTER_ROLE,
+        GROUP_NS,
+        GROUP_SA_NAME,
         SA1_NAME,
         SA1_NS,
         SA2_NAME,
@@ -171,7 +173,11 @@ def restricted_sa_tokens(_backend):
     kubectl("apply", "-f", "-", input=rendered_manifest())
     try:
         tokens = {}
-        for ns, sa in [(SA1_NS, SA1_NAME), (SA2_NS, SA2_NAME)]:
+        for ns, sa in [
+            (SA1_NS, SA1_NAME),
+            (SA2_NS, SA2_NAME),
+            (GROUP_NS, GROUP_SA_NAME),
+        ]:
             tok = kubectl(
                 "create", "token", sa, "-n", ns, "--duration", "1h"
             ).stdout.strip()
@@ -180,7 +186,7 @@ def restricted_sa_tokens(_backend):
         yield tokens
     finally:
         # Best-effort cleanup; don't fail teardown if the cluster is gone.
-        for ns in (SA1_NS, SA2_NS):
+        for ns in (SA1_NS, SA2_NS, GROUP_NS):
             kubectl("delete", "namespace", ns, "--wait=false", check=False)
         kubectl(
             "delete", "clusterrolebinding", BASELINE_CLUSTER_ROLE,

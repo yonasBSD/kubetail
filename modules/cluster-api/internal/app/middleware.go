@@ -132,10 +132,14 @@ func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 			return
 		}
 
+		// kube-apiserver emits one X-Remote-Group header per group via
+		// http.Header.Add. Use Values to read all of them — Get/GetHeader
+		// returns only the first, which silently drops the rest and breaks
+		// any RBAC binding whose subject isn't on the first group.
 		var groups []string
 		for _, h := range cfg.GroupHeaders {
-			if v := c.GetHeader(h); v != "" {
-				groups = append(groups, strings.Split(v, ",")...)
+			if vals := r.Header.Values(h); len(vals) > 0 {
+				groups = append(groups, vals...)
 				break
 			}
 		}

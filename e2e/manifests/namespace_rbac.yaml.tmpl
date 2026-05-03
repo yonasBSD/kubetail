@@ -98,6 +98,46 @@ roleRef:
   kind: Role
   name: $SA2_NAME-pod-log-reader
 ---
+# Group-bound access: pods/log in $GROUP_NS is granted via the Group subject
+# `system:serviceaccounts:$GROUP_NS` — every SA living in $GROUP_NS is auto-
+# included in that group. $GROUP_SA_NAME lives here and has no other RBAC path,
+# so its access proves group identity threads through kube-apiserver ->
+# cluster-api -> cluster-agent and is honored by SAR. SAs in $SA1_NS /
+# $SA2_NS are not members of this group and must be denied.
+apiVersion: v1
+kind: Namespace
+metadata: {name: $GROUP_NS}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $GROUP_SA_NAME
+  namespace: $GROUP_NS
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-log-reader
+  namespace: $GROUP_NS
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-log-reader-via-group
+  namespace: $GROUP_NS
+subjects:
+- kind: Group
+  name: system:serviceaccounts:$GROUP_NS
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-log-reader
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -127,6 +167,9 @@ subjects:
 - kind: ServiceAccount
   name: $SA2_NAME
   namespace: $SA2_NS
+- kind: ServiceAccount
+  name: $GROUP_SA_NAME
+  namespace: $GROUP_NS
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

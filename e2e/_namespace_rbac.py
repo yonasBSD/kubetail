@@ -14,8 +14,13 @@ import requests
 KUBECONFIG = "/tmp/kubetail-e2e.kubeconfig"
 SA1_NS = "e2e-rbac-ns-1"
 SA2_NS = "e2e-rbac-ns-2"
+# pods/log access granted via a Group subject (system:serviceaccounts:SA1_NS),
+# not a ServiceAccount subject — exercises group-header propagation.
+GROUP_NS = "e2e-rbac-group-ns"
 SA1_NAME = "restricted-user-1"
 SA2_NAME = "restricted-user-2"
+# Lives in GROUP_NS; its sole access path is the group binding there.
+GROUP_SA_NAME = "group-bound-user"
 POD_IMAGE = "busybox:1.36"
 BASELINE_CLUSTER_ROLE = "e2e-rbac-baseline"
 
@@ -38,8 +43,10 @@ def rendered_manifest():
     return string.Template(_MANIFEST_PATH.read_text()).substitute(
         SA1_NS=SA1_NS,
         SA2_NS=SA2_NS,
+        GROUP_NS=GROUP_NS,
         SA1_NAME=SA1_NAME,
         SA2_NAME=SA2_NAME,
+        GROUP_SA_NAME=GROUP_SA_NAME,
         POD_IMAGE=POD_IMAGE,
         BASELINE_CLUSTER_ROLE=BASELINE_CLUSTER_ROLE,
     )
