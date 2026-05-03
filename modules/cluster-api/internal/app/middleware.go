@@ -72,6 +72,11 @@ func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 
 		now := time.Now()
 
+		// The TLS handshake only proves possession of the private key for the
+		// leaf (PeerCertificates[0]); the rest of the slice is unauthenticated
+		// chain material the client supplied. Verifying any cert from the slice
+		// would let an attacker append a trusted CA/intermediate as a "chain"
+		// entry and have it accepted as the proxy identity.
 		var proxyCert *x509.Certificate
 		if cfg.ProxyCAs != nil {
 			opts := x509.VerifyOptions{
@@ -85,11 +90,9 @@ func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 					opts.Intermediates.AddCert(cert)
 				}
 			}
-			for _, cert := range r.TLS.PeerCertificates {
-				if _, err := cert.Verify(opts); err == nil {
-					proxyCert = cert
-					break
-				}
+			leaf := r.TLS.PeerCertificates[0]
+			if _, err := leaf.Verify(opts); err == nil {
+				proxyCert = leaf
 			}
 		}
 		if proxyCert == nil {

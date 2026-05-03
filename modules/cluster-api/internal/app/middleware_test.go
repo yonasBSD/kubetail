@@ -160,6 +160,30 @@ func TestAggregationAuth_RejectsNonFrontProxyCert(t *testing.T) {
 	assert.Nil(t, impersonate, "non-front-proxy cert must not produce an identity, even with spoofed headers")
 }
 
+// Threat model: TLS only proves possession of the leaf's private key
+// (PeerCertificates[0]). The remaining slice entries are unauthenticated
+// chain material the client supplies. If the middleware verifies any cert
+// in the slice, an attacker holding any leaf can append a trusted cert
+// (the proxy CA, a trusted intermediate, etc.) as PeerCertificates[1] and
+// have it accepted as the front-proxy identity — bypassing the entire
+// proof-of-possession guarantee.
+func TestAggregationAuth_RejectsTrustedCertAppendedAsChainEntry(t *testing.T) {
+	proxyCA := newTestCA(t, "proxy-ca")
+	attackerCA := newTestCA(t, "attacker-ca")
+	attackerLeaf := attackerCA.issue(t, "front-proxy-client")
+
+	// Attacker presents their own (untrusted) leaf, then appends the trusted
+	// proxy CA cert as a "chain" entry. AllowedNames is left empty so the CN
+	// check cannot mask the cert-verification bypass.
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(proxyCA))
+	r := requestWithCert([]*x509.Certificate{attackerLeaf, proxyCA.cert}, nil)
+	r.Header.Set("X-Remote-User", "system:masters")
+	w, impersonate := runMiddleware(mw, r)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
+	assert.Nil(t, impersonate, "appended trusted cert is unauthenticated chain material, not proof of possession")
+}
+
 func TestAggregationAuth_FrontProxyHeadersExtractIdentity(t *testing.T) {
 	proxyCA := newTestCA(t, "proxy-ca")
 	proxyLeaf := proxyCA.issue(t, "front-proxy-client")
