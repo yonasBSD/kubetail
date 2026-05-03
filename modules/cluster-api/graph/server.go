@@ -33,16 +33,20 @@ import (
 	grpcdispatcher "github.com/kubetail-org/grpc-dispatcher-go"
 
 	"github.com/kubetail-org/kubetail/modules/shared/graphql/directives"
+	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
 
+// ctxKey is a private type for keys defined in this package.
 type ctxKey int
 
 const (
-	// SessionCSRFTokenCtxKey is the request-context key for the dashboard
-	// session's CSRF token, forwarded by the dashboard reverse proxy and
-	// validated by the WebSocket InitFunc.
-	SessionCSRFTokenCtxKey ctxKey = iota
+	// forwardedCSRFTokenCtxKey holds a *string of the X-Forwarded-CSRF-Token
+	// header value from the WebSocket upgrade request. nil means the header
+	// was absent (non-browser caller); a non-nil value (including "") means
+	// it was present and the InitFunc must enforce a matching csrfToken in
+	// the connection_init payload.
+	forwardedCSRFTokenCtxKey ctxKey = iota
 )
 
 // Represents Server
@@ -81,11 +85,17 @@ func NewServer(cm k8shelpers.ConnectionManager, grpcDispatcher *grpcdispatcher.D
 
 	h.SetQueryCache(lru.New[*ast.QueryDocument](1000))
 
-	// Configure WebSocket. The cluster-api is intended for bot/programmatic
-	// clients, not browsers. Bots don't send Origin; browsers always do on a
-	// WebSocket upgrade. The dashboard's reverse proxy strips Origin before
-	// forwarding (after enforcing its own CSRF check), so its presence here
-	// indicates a direct browser connection — reject as CSWSH defense.
+	// Configure WebSocket. The cluster-api listener is mTLS-only, so any
+	// caller that reaches us has already authenticated via cert (direct
+	// client) or front-proxy (kube-apiserver aggregation). Browsers cannot
+	// speak mTLS to us, so CSWSH-from-browser is structurally impossible.
+	// The Origin gate stays as cheap belt-and-suspenders.
+	//
+	// When the upgrade request carries X-Forwarded-CSRF-Token (set by the
+	// dashboard's websocketCSRFContextMiddleware for browser-originated
+	// upgrades), require a matching csrfToken in the connection_init
+	// payload. Absent header means a non-browser caller and no check is
+	// performed.
 	h.AddTransport(&transport.Websocket{
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -95,12 +105,14 @@ func NewServer(cm k8shelpers.ConnectionManager, grpcDispatcher *grpcdispatcher.D
 			WriteBufferSize:   1024,
 			EnableCompression: false,
 		},
-		// No expected token means a bot/programmatic client (no proxy header);
-		// the upgrade-time Origin gate is the only check in that path.
 		InitFunc: func(ctx context.Context, initPayload transport.InitPayload) (context.Context, *transport.InitPayload, error) {
-			expected, _ := ctx.Value(SessionCSRFTokenCtxKey).(string)
-			got := initPayload.GetString("csrfToken")
-			if expected != "" && subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+			expectedPtr, _ := ctx.Value(forwardedCSRFTokenCtxKey).(*string)
+			if expectedPtr == nil {
+				return ctx, nil, nil
+			}
+			expected := strings.TrimSpace(*expectedPtr)
+			got := strings.TrimSpace(initPayload.GetString("csrfToken"))
+			if expected == "" || got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
 				return ctx, nil, errors.New("invalid CSRF token")
 			}
 			return ctx, nil, nil
@@ -155,15 +167,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 
 	if isLongLived {
-		ctx, cancel := context.WithCancel(r.Context())
+		cancelCtx, cancel := context.WithCancel(r.Context())
 		defer cancel()
 		go func() {
 			select {
-			case <-ctx.Done():
+			case <-cancelCtx.Done():
 			case <-s.shutdownCh:
 				cancel()
 			}
 		}()
+
+		// Stash X-Forwarded-CSRF-Token presence (not just value) into context
+		// so the WebSocket InitFunc can distinguish absent (no check) from
+		// present-but-empty (reject). r.Header.Values returns nil when the
+		// header wasn't sent at all.
+		ctx := cancelCtx
+		if r.Header.Get("Upgrade") != "" {
+			if vals := r.Header.Values(httphelpers.HeaderForwardedCSRFToken); vals != nil {
+				v := vals[0]
+				ctx = context.WithValue(ctx, forwardedCSRFTokenCtxKey, &v)
+			}
+		}
+
 		r = r.WithContext(ctx)
 	}
 

@@ -16,7 +16,6 @@ package app
 
 import (
 	"compress/gzip"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +25,6 @@ import (
 	"github.com/gin-contrib/requestid"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestRequestID(t *testing.T) {
@@ -82,34 +80,12 @@ func TestGzip(t *testing.T) {
 	assert.Equal(t, "ok", string(uncompressed))
 }
 
-func TestGraphQLRejectsUnauthenticatedSensitiveQuery(t *testing.T) {
-	app := NewTestApp(nil)
-
-	body := `{"query":"{ logRecordsFetch(sources: [\"default:pod/x\"]) { records { message } } }"}`
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/graphql", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	app.ServeHTTP(w, r)
-
-	assert.Equal(t, http.StatusOK, w.Result().StatusCode)
-
-	var resp struct {
-		Errors []struct {
-			Message    string         `json:"message"`
-			Extensions map[string]any `json:"extensions"`
-		} `json:"errors"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	require.NotEmpty(t, resp.Errors, "expected at least one GraphQL error, body=%q", w.Body.String())
-	assert.Equal(t, "KUBETAIL_UNAUTHENTICATED", resp.Errors[0].Extensions["code"])
-}
-
 func TestGraphQLAllowsUnauthenticatedIntrospection(t *testing.T) {
 	app := NewTestApp(nil)
 
 	body := `{"query":"{ __typename }"}`
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("POST", "/graphql", strings.NewReader(body))
+	r := httptest.NewRequest("POST", "/apis/api.kubetail.com/v1/graphql", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	app.ServeHTTP(w, r)
 
@@ -126,6 +102,21 @@ func TestHealthz(t *testing.T) {
 	app.ServeHTTP(w, r)
 
 	// check response
+	result := w.Result()
+	assert.Equal(t, http.StatusOK, result.StatusCode)
+	assert.Equal(t, "{\"status\":\"ok\"}", w.Body.String())
+}
+
+// The dashboard cluster-api proxy rewrites `/cluster-api-proxy/healthz` to
+// `/apis/api.kubetail.com/v1/healthz`, so the health endpoint must also be
+// reachable under the aggregated APIService path.
+func TestHealthzAggregated(t *testing.T) {
+	app := NewTestApp(nil)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/apis/api.kubetail.com/v1/healthz", nil)
+	app.ServeHTTP(w, r)
+
 	result := w.Result()
 	assert.Equal(t, http.StatusOK, result.StatusCode)
 	assert.Equal(t, "{\"status\":\"ok\"}", w.Body.String())

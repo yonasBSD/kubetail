@@ -28,10 +28,6 @@ import (
 
 // LogMetadataList is the resolver for the logMetadataList field.
 func (r *queryResolver) LogMetadataList(ctx context.Context, namespace *string) (*clusteragentpb.LogMetadataList, error) {
-	if _, err := r.getBearerTokenRequired(ctx); err != nil {
-		return nil, gqlerrors.ErrUnauthenticated
-	}
-
 	// Deref namespace
 	nsList, err := k8shelpers.DerefNamespaceToList(r.allowedNamespaces, namespace, metav1.NamespaceDefault)
 	if err != nil {
@@ -75,11 +71,6 @@ func (r *queryResolver) LogMetadataList(ctx context.Context, namespace *string) 
 
 // LogRecordsFetch is the resolver for the logRecordsFetch field.
 func (r *queryResolver) LogRecordsFetch(ctx context.Context, kubeContext *string, sources []string, mode *model.LogRecordsQueryMode, since *string, until *string, after *string, before *string, grep *string, sourceFilter *model.LogSourceFilter, limit *int) (*model.LogRecordsQueryResponse, error) {
-	token, err := r.getBearerTokenRequired(ctx)
-	if err != nil {
-		return nil, gqlerrors.ErrUnauthenticated
-	}
-
 	// Parse time args
 	sinceTime, err := logs.ParseTimeArg(ptr.Deref(since, ""))
 	if err != nil {
@@ -114,7 +105,6 @@ func (r *queryResolver) LogRecordsFetch(ctx context.Context, kubeContext *string
 	sourceFilterVal := ptr.Deref(sourceFilter, model.LogSourceFilter{})
 
 	streamOpts := []logs.Option{
-		logs.WithBearerToken(token),
 		logs.WithAllowedNamespaces(r.allowedNamespaces),
 		logs.WithLogFetcher(logs.NewAgentLogFetcher(r.grpcDispatcher)),
 		logs.WithSince(sinceTime),
@@ -194,10 +184,6 @@ func (r *queryResolver) LogRecordsFetch(ctx context.Context, kubeContext *string
 
 // LogMetadataWatch is the resolver for the logMetadataWatch field.
 func (r *subscriptionResolver) LogMetadataWatch(ctx context.Context, namespace *string) (<-chan *clusteragentpb.LogMetadataWatchEvent, error) {
-	if _, err := r.getBearerTokenRequired(ctx); err != nil {
-		return nil, gqlerrors.ErrUnauthenticated
-	}
-
 	// Deref namespaces
 	nsList, err := k8shelpers.DerefNamespaceToList(r.allowedNamespaces, namespace, metav1.NamespaceDefault)
 	if err != nil {
@@ -268,11 +254,6 @@ func (r *subscriptionResolver) LogMetadataWatch(ctx context.Context, namespace *
 
 // LogRecordsFollow is the resolver for the logRecordsFollow field.
 func (r *subscriptionResolver) LogRecordsFollow(ctx context.Context, kubeContext *string, sources []string, since *string, after *string, grep *string, sourceFilter *model.LogSourceFilter) (<-chan *logs.LogRecord, error) {
-	token, err := r.getBearerTokenRequired(ctx)
-	if err != nil {
-		return nil, gqlerrors.ErrUnauthenticated
-	}
-
 	// Parse time args
 	sinceTime, err := logs.ParseTimeArg(ptr.Deref(since, ""))
 	if err != nil {
@@ -293,7 +274,6 @@ func (r *subscriptionResolver) LogRecordsFollow(ctx context.Context, kubeContext
 	sourceFilterVal := ptr.Deref(sourceFilter, model.LogSourceFilter{})
 
 	streamOpts := []logs.Option{
-		logs.WithBearerToken(token),
 		logs.WithAllowedNamespaces(r.allowedNamespaces),
 		logs.WithLogFetcher(logs.NewAgentLogFetcher(r.grpcDispatcher)),
 		logs.WithAll(),

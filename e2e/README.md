@@ -21,7 +21,7 @@ Default values are in `.env`. Override any value by editing that file or setting
 | Variable          | Default                 | Description                          |
 |-------------------|-------------------------|--------------------------------------|
 | `DASHBOARD_URL`   | `http://localhost:9999` | URL of the cluster dashboard         |
-| `CLUSTER_API_URL` | `http://localhost:9998` | URL of the kubetail cluster-api      |
+| `CLUSTER_API_URL` | `https://localhost:9998` | URL of the kubetail cluster-api     |
 | `SERVE_PORT`      | `9898`                  | Port used by `kubetail serve`        |
 | `KUBETAIL_CLI`    | `../bin/kubetail`       | Path to the kubetail binary          |
 

@@ -26,19 +26,17 @@ The Kubetail Cluster API executable can be configured using a configuration file
 | cluster-api.base-path                             | string   | URL path prefix                                    | "/"                                         | stable |
 | cluster-api.gin-mode                              | string   | Gin mode (release, debug)                          | "release"                                   | stable |
 | cluster-api.cluster-agent.dispatch-url            | string   | URL for sending dispatch requests to cluster-agent | "kubernetes://kubetail-cluster-agent:50051" | alpha  |
-| cluster-api.cluster-agent.tls.enabled             | bool     | Enable tls                                         | false                                       | alpha  |
-| cluster-api.cluster-agent.tls.cert-file           | string   | Path to tls certificate file                       | ""                                          | alpha  |
-| cluster-api.cluster-agent.tls.key-file            | string   | Path to tls key file                               | ""                                          | alpha  |  
-| cluster-api.cluster-agent.tls.ca-file             | string   | Path to tls CA bundle file                         | ""                                          | alpha  |
+| cluster-api.cluster-agent.tls.cert-file           | string   | Path to tls certificate file (required)            | ""                                          | alpha  |
+| cluster-api.cluster-agent.tls.key-file            | string   | Path to tls key file (required)                    | ""                                          | alpha  |
+| cluster-api.cluster-agent.tls.ca-file             | string   | Path to tls CA bundle file (required)              | ""                                          | alpha  |
 | cluster-api.cluster-agent.tls.server-name         | string   | Server name for conection verification             | ""                                          | alpha  |
 | cluster-api.logging.enabled                       | bool     | Enable logging                                     | true                                        | stable |
 | cluster-api.logging.level                         | string   | Log level                                          | "info"                                      | stable |
 | cluster-api.logging.format                        | string   | Log format (json, pretty)                          | "json"                                      | stable |
 | cluster-api.logging.access-log.enabled            | bool     | Enable access log                                  | true                                        | stable |
 | cluster-api.logging.access-log.hide-health-checks | bool     | Hide requests to /healthz from access log          | false                                       | stable |
-| cluster-api.tls.enabled                           | bool     | Enable tls                                         | false                                       | stable |
-| cluster-api.tls.cert-file                         | string   | Path to tls certificate file                       | ""                                          | stable |
-| cluster-api.tls.key-file                          | string   | Path to tls key file                               | ""                                          | stable |  
+| cluster-api.tls.cert-file                         | string   | Path to tls certificate file (required)            | ""                                          | stable |
+| cluster-api.tls.key-file                          | string   | Path to tls key file (required)                    | ""                                          | stable |  
 
 ## GraphQL
 

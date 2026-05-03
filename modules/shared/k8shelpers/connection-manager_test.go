@@ -17,10 +17,13 @@ package k8shelpers
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -141,6 +144,140 @@ func TestInClusterConnectionManager_NewInformer_AuthorizationFailure(t *testing.
 
 	// Verify that the mock was called as expected
 	mockAuthorizer.AssertExpectations(t)
+}
+
+// Pins the wiring that propagates the originating user's identity to
+// kube-apiserver. The in-cluster REST config must wrap its transport with
+// both ImpersonatingRoundTripper (cluster-api → aggregation layer path) and
+// BearerTokenRoundTripper (dashboard auth-mode: token path). A regression
+// that drops either would silently downgrade per-user calls to run as the
+// pod ServiceAccount, bypassing the caller's RBAC.
+func TestInClusterConnectionManager_RestConfigWrapsTransportWithImpersonation(t *testing.T) {
+	orig := inClusterConfigFn
+	t.Cleanup(func() { inClusterConfigFn = orig })
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return &rest.Config{Host: "https://example.invalid"}, nil
+	}
+
+	cm, err := NewInClusterConnectionManager()
+	require.NoError(t, err)
+
+	rc, err := cm.GetOrCreateRestConfig("")
+	require.NoError(t, err)
+	require.NotNil(t, rc.WrapTransport, "WrapTransport must be set so per-request identity headers reach kube-apiserver")
+
+	inner := http.DefaultTransport
+	wrapped := rc.WrapTransport(inner)
+	impRT, ok := wrapped.(*ImpersonatingRoundTripper)
+	require.Truef(t, ok, "WrapTransport must produce *ImpersonatingRoundTripper; got %T", wrapped)
+	bearerRT, ok := impRT.Transport.(*BearerTokenRoundTripper)
+	require.Truef(t, ok, "ImpersonatingRoundTripper must wrap *BearerTokenRoundTripper so dashboard token-auth still forwards the user's bearer token; got %T", impRT.Transport)
+	assert.Same(t, inner, bearerRT.Transport, "BearerTokenRoundTripper must wrap the underlying transport, not replace it")
+}
+
+// End-to-end-ish coverage of the in-cluster identity-propagation chain: builds
+// a real http.Client from the connection manager's rest.Config and confirms
+// that the headers reaching the upstream depend on which context key the
+// caller set. This guards against future refactors that swap the
+// WrapTransport composition and silently downgrade per-user calls to the
+// pod ServiceAccount.
+func TestInClusterConnectionManager_RestConfigPropagatesIdentityHeaders(t *testing.T) {
+	type captured struct {
+		authorization   string
+		impersonateUser string
+		impersonateGrp  []string
+	}
+
+	var got captured
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = captured{
+			authorization:   r.Header.Get("Authorization"),
+			impersonateUser: r.Header.Get("Impersonate-User"),
+			impersonateGrp:  r.Header.Values("Impersonate-Group"),
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	orig := inClusterConfigFn
+	t.Cleanup(func() { inClusterConfigFn = orig })
+	inClusterConfigFn = func() (*rest.Config, error) {
+		// Bare config — no BearerToken/BearerTokenFile so we can observe
+		// exactly what the WrapTransport chain contributes per request.
+		return &rest.Config{Host: srv.URL}, nil
+	}
+
+	cm, err := NewInClusterConnectionManager()
+	require.NoError(t, err)
+
+	rc, err := cm.GetOrCreateRestConfig("")
+	require.NoError(t, err)
+
+	client, err := rest.HTTPClientFor(rc)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		ctx      func() context.Context
+		wantAuth string
+		wantUser string
+		wantGrps []string
+	}{
+		{
+			name:     "no identity on context — unrelated callers (health checks) pass through unchanged",
+			ctx:      context.Background,
+			wantAuth: "",
+			wantUser: "",
+			wantGrps: nil,
+		},
+		{
+			name: "K8STokenCtxKey only — dashboard auth-mode: token must forward the user's bearer token",
+			ctx: func() context.Context {
+				return context.WithValue(context.Background(), K8STokenCtxKey, "user-token-abc")
+			},
+			wantAuth: "Bearer user-token-abc",
+			wantUser: "",
+			wantGrps: nil,
+		},
+		{
+			name: "K8SImpersonateCtxKey only — cluster-api aggregation path must impersonate the originating user",
+			ctx: func() context.Context {
+				return context.WithValue(context.Background(), K8SImpersonateCtxKey, &ImpersonateInfo{
+					User:   "alice@example.com",
+					Groups: []string{"system:authenticated", "devs"},
+				})
+			},
+			wantAuth: "",
+			wantUser: "alice@example.com",
+			wantGrps: []string{"system:authenticated", "devs"},
+		},
+		{
+			name: "both keys present — both wrappers contribute headers independently",
+			ctx: func() context.Context {
+				ctx := context.WithValue(context.Background(), K8STokenCtxKey, "user-token-xyz")
+				return context.WithValue(ctx, K8SImpersonateCtxKey, &ImpersonateInfo{User: "bob"})
+			},
+			wantAuth: "Bearer user-token-xyz",
+			wantUser: "bob",
+			wantGrps: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got = captured{}
+			req, err := http.NewRequestWithContext(tt.ctx(), http.MethodGet, srv.URL+"/healthz", nil)
+			require.NoError(t, err)
+
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			resp.Body.Close()
+
+			assert.Equal(t, tt.wantAuth, got.authorization, "Authorization header")
+			assert.Equal(t, tt.wantUser, got.impersonateUser, "Impersonate-User header")
+			assert.Equal(t, tt.wantGrps, got.impersonateGrp, "Impersonate-Group headers")
+		})
+	}
 }
 
 func TestInClusterConnectionManager_NewInformer_KubeContextNotSupported(t *testing.T) {

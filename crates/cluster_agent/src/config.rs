@@ -51,19 +51,17 @@ pub struct LoggingConfig {
 
 #[derive(Deserialize, Debug)]
 pub struct TlsConfig {
-    pub enabled: bool,
-
     #[serde(rename(deserialize = "cert-file"))]
-    pub cert_file: Option<PathBuf>,
+    pub cert_file: PathBuf,
 
     #[serde(rename(deserialize = "key-file"))]
-    pub key_file: Option<PathBuf>,
+    pub key_file: PathBuf,
 
     #[serde(rename(deserialize = "ca-file"))]
-    pub ca_file: Option<PathBuf>,
+    pub ca_file: PathBuf,
 
-    #[serde(rename(deserialize = "client-auth"))]
-    pub client_auth: Option<String>,
+    #[serde(rename(deserialize = "allowed-names"), default)]
+    pub allowed_names: Vec<String>,
 }
 
 impl Config {
@@ -86,32 +84,12 @@ impl Config {
             .build()?;
 
         let cfg: ConfigInternal = settings.try_deserialize()?;
-        let tls = cfg.tls;
-
-        if tls.enabled {
-            if tls.cert_file.is_none() || tls.key_file.is_none() {
-                return Err(Box::new(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Cert file and key file should be supplied when tls is enabled",
-                )));
-            }
-
-            #[allow(clippy::collapsible_if)]
-            if let Some(client_auth) = &tls.client_auth {
-                if client_auth == "require-and-verify" && tls.ca_file.is_none() {
-                    return Err(Box::new(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Trusted certificates should be supplied for require-and-verify",
-                    )));
-                }
-            }
-        }
 
         Ok(Self {
             address: Self::parse_address(&cfg.address)?,
             logs_dir: cfg.logs_dir,
             logging: cfg.logging,
-            tls,
+            tls: cfg.tls,
         })
     }
 
@@ -133,8 +111,7 @@ impl Config {
             .set_default("container-logs-dir", "/var/log/containers")?
             .set_default("logging.enabled", true)?
             .set_default("logging.level", "info")?
-            .set_default("logging.format", "json")?
-            .set_default("tls.enabled", false)
+            .set_default("logging.format", "json")
     }
 
     fn get_format(path: &Path) -> Result<FileFormat, Box<io::Error>> {
@@ -172,85 +149,62 @@ mod tests {
             .suffix(extension)
             .tempfile()
             .expect("Failed to create temp file");
-
         file.write_all(content.as_bytes())
             .expect("Failed to write to file");
-
         file.flush().expect("Failed to flush file");
-
         file
+    }
+
+    /// Indented YAML body for the `tls:` block; the caller writes the `tls:`
+    /// key.
+    const VALID_TLS_BLOCK: &str = r#"  cert-file: "/path/to/cert.pem"
+  key-file: "/path/to/key.pem"
+  ca-file: "/path/to/ca.pem"
+"#;
+
+    /// Standard non-TLS scaffolding (addr/logs-dir/logging) so each test only
+    /// has to vary what it cares about.
+    const BASE_YAML: &str = "addr: \":8080\"\ncontainer-logs-dir: \"/logs\"\nlogging:\n  enabled: true\n  level: \"info\"\n  format: \"json\"\n";
+
+    fn full_yaml() -> String {
+        format!("{BASE_YAML}tls:\n{VALID_TLS_BLOCK}")
     }
 
     #[tokio::test]
     #[serial]
     async fn test_parse_basic_yaml_config() {
-        let config_content = r#"addr: "127.0.0.1:8080"
-container-logs-dir: "/test/logs"
-logging:
-  enabled: true
-  level: "debug"
-  format: "json"
-tls:
-  enabled: false
-"#;
-        let file = create_config_file(config_content, ".yaml");
-
-        let config = Config::parse(file.path(), vec![])
-            .await
-            .expect("Failed to parse config");
-
+        let content = format!(
+            "addr: \"127.0.0.1:8080\"\ncontainer-logs-dir: \"/test/logs\"\nlogging:\n  enabled: true\n  level: \"debug\"\n  format: \"json\"\ntls:\n{VALID_TLS_BLOCK}"
+        );
+        let file = create_config_file(&content, ".yaml");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
         assert_eq!(config.address.to_string(), "127.0.0.1:8080");
         assert_eq!(config.logs_dir, PathBuf::from("/test/logs"));
         assert!(config.logging.enabled);
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, "json");
-        assert!(!config.tls.enabled);
     }
 
     #[tokio::test]
     #[serial]
     async fn test_parse_shorthand_address() {
-        let config_content = r#"addr: ":9090"
-container-logs-dir: "/logs"
-logging:
-  enabled: true
-  level: "info"
-  format: "json"
-tls:
-  enabled: false
-"#;
-        let file = create_config_file(config_content, ".yaml");
-
-        let config = Config::parse(file.path(), vec![])
-            .await
-            .expect("Failed to parse config");
-
+        let content = format!(
+            "addr: \":9090\"\ncontainer-logs-dir: \"/logs\"\nlogging:\n  enabled: true\n  level: \"info\"\n  format: \"json\"\ntls:\n{VALID_TLS_BLOCK}"
+        );
+        let file = create_config_file(&content, ".yaml");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
         assert_eq!(config.address.to_string(), "[::]:9090");
     }
 
     #[tokio::test]
     #[serial]
     async fn test_parse_with_overrides() {
-        let config_content = r#"addr: "127.0.0.1:8080"
-container-logs-dir: "/logs"
-logging:
-  enabled: true
-  level: "info"
-  format: "json"
-tls:
-  enabled: false
-"#;
-        let file = create_config_file(config_content, ".yaml");
-
+        let file = create_config_file(&full_yaml(), ".yaml");
         let overrides = vec![
             ("addr".to_string(), ":5555".to_string()),
             ("logging.level".to_string(), "trace".to_string()),
         ];
-
-        let config = Config::parse(file.path(), overrides)
-            .await
-            .expect("Failed to parse config");
-
+        let config = Config::parse(file.path(), overrides).await.unwrap();
         assert_eq!(config.address.to_string(), "[::]:5555");
         assert_eq!(config.logging.level, "trace");
     }
@@ -258,24 +212,18 @@ tls:
     #[tokio::test]
     #[serial]
     async fn test_parse_json_format() {
-        let config_content = r#"{
+        let content = r#"{
   "addr": "0.0.0.0:3000",
   "container-logs-dir": "/var/logs",
-  "logging": {
-    "enabled": false,
-    "level": "error",
-    "format": "text"
-  },
+  "logging": {"enabled": false, "level": "error", "format": "json"},
   "tls": {
-    "enabled": false
+    "cert-file": "/path/to/cert.pem",
+    "key-file": "/path/to/key.pem",
+    "ca-file": "/path/to/ca.pem"
   }
 }"#;
-        let file = create_config_file(config_content, ".json");
-
-        let config = Config::parse(file.path(), vec![])
-            .await
-            .expect("Failed to parse config");
-
+        let file = create_config_file(content, ".json");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
         assert_eq!(config.address.to_string(), "0.0.0.0:3000");
         assert!(!config.logging.enabled);
     }
@@ -283,7 +231,7 @@ tls:
     #[tokio::test]
     #[serial]
     async fn test_parse_toml_format() {
-        let config_content = r#"addr = ":7070"
+        let content = r#"addr = ":7070"
 container-logs-dir = "/toml/logs"
 
 [logging]
@@ -292,115 +240,54 @@ level = "info"
 format = "json"
 
 [tls]
-enabled = false
+cert-file = "/path/to/cert.pem"
+key-file = "/path/to/key.pem"
+ca-file = "/path/to/ca.pem"
 "#;
-        let file = create_config_file(config_content, ".toml");
-
-        let config = Config::parse(file.path(), vec![])
-            .await
-            .expect("Failed to parse config");
-
+        let file = create_config_file(content, ".toml");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
         assert_eq!(config.address.to_string(), "[::]:7070");
     }
 
     #[tokio::test]
     #[serial]
-    async fn test_tls_enabled_without_cert_files_fails() {
-        let config_content = r#"addr: ":8080"
-container-logs-dir: "/logs"
-logging:
-  enabled: true
-  level: "info"
-  format: "json"
-tls:
-  enabled: true
-"#;
-        let file = create_config_file(config_content, ".yaml");
-
-        let result = Config::parse(file.path(), vec![]).await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Cert file and key file")
-                || err.to_string().contains("should be supplied")
-        );
+    async fn test_loaded_tls_files() {
+        let file = create_config_file(&full_yaml(), ".yaml");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
+        assert_eq!(config.tls.cert_file, PathBuf::from("/path/to/cert.pem"));
+        assert_eq!(config.tls.key_file, PathBuf::from("/path/to/key.pem"));
+        assert_eq!(config.tls.ca_file, PathBuf::from("/path/to/ca.pem"));
     }
 
     #[tokio::test]
     #[serial]
-    async fn test_tls_require_and_verify_without_ca_fails() {
-        let config_content = r#"addr: ":8080"
-container-logs-dir: "/logs"
-logging:
-  enabled: true
-  level: "info"
-  format: "json"
-tls:
-  enabled: true
-  cert-file: "/path/to/cert.pem"
-  key-file: "/path/to/key.pem"
-  client-auth: "require-and-verify"
-"#;
-        let file = create_config_file(config_content, ".yaml");
-
-        let result = Config::parse(file.path(), vec![]).await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("Trusted certificates")
-                || err.to_string().contains("should be supplied")
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn test_tls_enabled_with_all_files_succeeds() {
-        let config_content = r#"addr: ":8080"
-container-logs-dir: "/logs"
-logging:
-  enabled: true
-  level: "info"
-  format: "json"
-tls:
-  enabled: true
-  cert-file: "/path/to/cert.pem"
-  key-file: "/path/to/key.pem"
-  ca-file: "/path/to/ca.pem"
-  client-auth: "require-and-verify"
-"#;
-        let file = create_config_file(config_content, ".yaml");
-
-        let config = Config::parse(file.path(), vec![])
-            .await
-            .expect("Failed to parse config");
-
-        assert!(config.tls.enabled);
-        assert_eq!(
-            config.tls.cert_file,
-            Some(PathBuf::from("/path/to/cert.pem"))
-        );
-        assert_eq!(config.tls.key_file, Some(PathBuf::from("/path/to/key.pem")));
-        assert_eq!(config.tls.ca_file, Some(PathBuf::from("/path/to/ca.pem")));
-        assert_eq!(
-            config.tls.client_auth,
-            Some("require-and-verify".to_string())
-        );
+    async fn test_missing_tls_file_fails() {
+        let all = ["cert-file", "key-file", "ca-file"];
+        for missing in &all {
+            let tls_lines: String = all
+                .iter()
+                .filter(|k| **k != *missing)
+                .map(|k| format!("  {k}: \"/path/to/{k}.pem\"\n"))
+                .collect();
+            let content = format!("{BASE_YAML}tls:\n{tls_lines}");
+            let file = create_config_file(&content, ".yaml");
+            let err = Config::parse(file.path(), vec![])
+                .await
+                .expect_err(&format!("expected error when {missing} is missing"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains(missing),
+                "error for missing {missing} should mention it; got: {msg}"
+            );
+        }
     }
 
     #[tokio::test]
     #[serial]
     async fn test_parse_with_defaults() {
-        let config_content = r#"tls:
-  enabled: false
-"#;
-        let file = create_config_file(config_content, ".yaml");
-
-        let config = Config::parse(file.path(), vec![])
-            .await
-            .expect("Failed to parse config");
-
+        let content = format!("tls:\n{VALID_TLS_BLOCK}");
+        let file = create_config_file(&content, ".yaml");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
         assert_eq!(config.address.to_string(), "[::]:50051");
         assert_eq!(config.logs_dir, PathBuf::from("/var/log/containers"));
         assert!(config.logging.enabled);
@@ -410,14 +297,46 @@ tls:
 
     #[tokio::test]
     #[serial]
+    async fn test_allowed_names_defaults_to_empty() {
+        let file = create_config_file(&full_yaml(), ".yaml");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
+        assert!(config.tls.allowed_names.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_allowed_names_parses_list() {
+        let content = format!(
+            "tls:\n{VALID_TLS_BLOCK}  allowed-names:\n    - \"kubetail-cluster-api\"\n    - \"other-trusted-proxy\"\n"
+        );
+        let file = create_config_file(&content, ".yaml");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
+        assert_eq!(
+            config.tls.allowed_names,
+            vec![
+                "kubetail-cluster-api".to_string(),
+                "other-trusted-proxy".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_allowed_names_empty_list_when_explicitly_set() {
+        let content = format!("tls:\n{VALID_TLS_BLOCK}  allowed-names: []\n");
+        let file = create_config_file(&content, ".yaml");
+        let config = Config::parse(file.path(), vec![]).await.unwrap();
+        assert!(config.tls.allowed_names.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn test_invalid_file_format_fails() {
         let file = tempfile::Builder::new()
             .suffix(".invalid")
             .tempfile()
             .expect("Failed to create temp file");
-
         let result = Config::parse(file.path(), vec![]).await;
-
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("not of a registered file format"));

@@ -63,7 +63,10 @@ func (h *downloadHandlers) DownloadPOST(c *gin.Context) {
 		return
 	}
 
-	opts := logs.BuildDownloadStreamOptions(req, c.GetString(k8sTokenGinKey), h.allowedNamespaces)
+	opts := logs.BuildDownloadStreamOptions(req, h.allowedNamespaces)
+	if token := c.GetString(k8sTokenGinKey); token != "" {
+		opts = append(opts, logs.WithBearerToken(token))
+	}
 
 	ctx := c.Request.Context()
 	stream, err := h.newLogStream(ctx, req.Raw.Sources, opts...)

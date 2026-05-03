@@ -260,7 +260,7 @@ export const mocks: MockedResponse[] = [
   {
     request: {
       query: dashboardOps.CLUSTER_API_READY_WAIT,
-      variables: { kubeContext: 'test1', namespace: 'kubetail-system', serviceName: 'kubetail-cluster-api' },
+      variables: { kubeContext: 'test1' },
     },
     result: {
       data: {

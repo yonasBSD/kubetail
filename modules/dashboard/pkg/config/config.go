@@ -52,14 +52,14 @@ type Config struct {
 	AllowedNamespaces []string `mapstructure:"allowed-namespaces"`
 	KubeconfigPath    string   `mapstructure:"kubeconfig"`
 
-	Addr               string   `mapstructure:"addr" validate:"omitempty,hostname_port"`
-	AllowedOrigins     []string `mapstructure:"allowed-origins" validate:"dive,url"`
-	AuthMode           AuthMode `mapstructure:"auth-mode"`
-	BasePath           string   `mapstructure:"base-path"`
-	CLIVersion         string
-	ClusterAPIEndpoint string `mapstructure:"cluster-api-endpoint"`
-	GinMode            string `mapstructure:"gin-mode" validate:"omitempty,oneof=debug release"`
-	Environment        sharedcfg.Environment
+	Addr              string   `mapstructure:"addr" validate:"omitempty,hostname_port"`
+	AllowedOrigins    []string `mapstructure:"allowed-origins" validate:"dive,url"`
+	AuthMode          AuthMode `mapstructure:"auth-mode"`
+	BasePath          string   `mapstructure:"base-path"`
+	CLIVersion        string
+	ClusterAPIEnabled bool   `mapstructure:"cluster-api-enabled"`
+	GinMode           string `mapstructure:"gin-mode" validate:"omitempty,oneof=debug release"`
+	Environment       sharedcfg.Environment
 
 	// Parent directory for local files (preferences, future cache/state).
 	// When empty, features that require local storage are disabled.
@@ -103,8 +103,7 @@ type Config struct {
 
 	// UI options
 	UI struct {
-		ClusterAPIEnabled bool     `mapstructure:"cluster-api-enabled"`
-		Columns           []string `mapstructure:"columns"`
+		Columns []string `mapstructure:"columns"`
 	}
 }
 
@@ -145,7 +144,7 @@ func DefaultConfig() *Config {
 	cfg.AllowedOrigins = []string{}
 	cfg.AuthMode = AuthModeAuto
 	cfg.BasePath = "/"
-	cfg.ClusterAPIEndpoint = ""
+	cfg.ClusterAPIEnabled = true
 	cfg.Environment = sharedcfg.EnvironmentCluster
 	cfg.GinMode = "release"
 	cfg.Logging.Enabled = true
@@ -163,7 +162,6 @@ func DefaultConfig() *Config {
 	cfg.TLS.Enabled = false
 	cfg.TLS.CertFile = ""
 	cfg.TLS.KeyFile = ""
-	cfg.UI.ClusterAPIEnabled = true
 	cfg.UI.Columns = []string{"timestamp", "dot"}
 
 	return cfg

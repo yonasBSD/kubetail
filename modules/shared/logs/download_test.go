@@ -193,21 +193,12 @@ func TestDownloadFormValidate(t *testing.T) {
 func TestBuildDownloadStreamOptionsAllowedNamespaces(t *testing.T) {
 	req := &DownloadRequest{Raw: DownloadForm{Mode: DownloadModeHead}}
 
-	without := BuildDownloadStreamOptions(req, "", nil)
-	withEmpty := BuildDownloadStreamOptions(req, "", []string{})
-	withNs := BuildDownloadStreamOptions(req, "", []string{"ns1", "ns2"})
+	without := BuildDownloadStreamOptions(req, nil)
+	withEmpty := BuildDownloadStreamOptions(req, []string{})
+	withNs := BuildDownloadStreamOptions(req, []string{"ns1", "ns2"})
 
 	assert.Equal(t, len(without), len(withEmpty))
 	assert.Equal(t, len(without)+1, len(withNs))
-}
-
-func TestBuildDownloadStreamOptionsBearerToken(t *testing.T) {
-	req := &DownloadRequest{Raw: DownloadForm{Mode: DownloadModeHead}}
-
-	without := BuildDownloadStreamOptions(req, "", nil)
-	with := BuildDownloadStreamOptions(req, "tok", nil)
-
-	assert.Equal(t, len(without)+1, len(with))
 }
 
 func TestDownloadContentTypeAndExt(t *testing.T) {

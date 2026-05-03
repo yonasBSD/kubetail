@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 import requests
+import urllib3
 from dotenv import load_dotenv
+
+# e2e cluster-api uses a self-signed cert; suppress the noisy warning.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -101,11 +105,17 @@ users:
 """
 
 
+# Kubeconfig written by scripts/up.sh.
+_E2E_KUBECONFIG = "/tmp/kubetail-e2e.kubeconfig"
+
+
 @pytest.fixture(scope="session")
 def serve_url(cli, request):
     port = int(os.environ.get("SERVE_PORT", 9898))
     env = os.environ.copy()
-    if not Path(env.get("KUBECONFIG", Path.home() / ".kube" / "config")).exists():
+    if Path(_E2E_KUBECONFIG).exists():
+        env["KUBECONFIG"] = _E2E_KUBECONFIG
+    elif not Path(env.get("KUBECONFIG", Path.home() / ".kube" / "config")).exists():
         tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".kubeconfig", delete=False
         )
@@ -131,9 +141,61 @@ def serve_url(cli, request):
 
 
 def assert_healthz(url):
-    resp = requests.get(f"{url}/healthz")
+    resp = requests.get(f"{url}/healthz", verify=False)
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+@pytest.fixture(scope="session")
+def restricted_sa_tokens(_backend):
+    """Apply the namespace-scoped RBAC manifest and yield SA bearer tokens.
+
+    Returns a dict mapping namespace -> token, where each SA's RBAC grants
+    pod/log access in that namespace only. Shared by the cli and cluster
+    namespace-rbac tests so the cluster only pays the manifest-apply cost
+    once per backend.
+    """
+    from _namespace_rbac import (
+        BASELINE_CLUSTER_ROLE,
+        GROUP_NS,
+        GROUP_SA_NAME,
+        SA1_NAME,
+        SA1_NS,
+        SA2_NAME,
+        SA2_NS,
+        kubectl,
+        rendered_manifest,
+    )
+
+    if not Path(_E2E_KUBECONFIG).exists():
+        pytest.skip(f"e2e kubeconfig {_E2E_KUBECONFIG} not found")
+
+    kubectl("apply", "-f", "-", input=rendered_manifest())
+    try:
+        tokens = {}
+        for ns, sa in [
+            (SA1_NS, SA1_NAME),
+            (SA2_NS, SA2_NAME),
+            (GROUP_NS, GROUP_SA_NAME),
+        ]:
+            tok = kubectl(
+                "create", "token", sa, "-n", ns, "--duration", "1h"
+            ).stdout.strip()
+            assert tok, f"empty token for {ns}/{sa}"
+            tokens[ns] = tok
+        yield tokens
+    finally:
+        # Best-effort cleanup; don't fail teardown if the cluster is gone.
+        for ns in (SA1_NS, SA2_NS, GROUP_NS):
+            kubectl("delete", "namespace", ns, "--wait=false", check=False)
+        kubectl(
+            "delete", "clusterrolebinding", BASELINE_CLUSTER_ROLE,
+            "--ignore-not-found", check=False,
+        )
+        kubectl(
+            "delete", "clusterrole", BASELINE_CLUSTER_ROLE,
+            "--ignore-not-found", check=False,
+        )
 
 
 def pytest_collection_modifyitems(config, items):

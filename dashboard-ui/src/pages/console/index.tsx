@@ -25,7 +25,6 @@ import AuthRequired from '@/components/utils/AuthRequired';
 import type { LogViewerHandle } from '@/components/widgets/log-viewer';
 import type { LogSourceFilter } from '@/lib/graphql/dashboard/__generated__/graphql';
 import { useIsClusterAPIEnabled } from '@/lib/hooks';
-import { CLUSTER_API_PROXY_NAMESPACE, CLUSTER_API_PROXY_SERVICE } from '@/lib/util';
 
 import { Header } from './header';
 import { LogServerClient } from './log-server-client';
@@ -187,11 +186,7 @@ export default function Page() {
 
     let apolloClient: ApolloClient;
     if (shouldUseClusterAPI) {
-      apolloClient = getClusterAPIClient({
-        kubeContext: kubeContext ?? '',
-        namespace: CLUSTER_API_PROXY_NAMESPACE,
-        serviceName: CLUSTER_API_PROXY_SERVICE,
-      });
+      apolloClient = getClusterAPIClient(kubeContext ?? '');
     } else {
       apolloClient = dashboardClient;
     }

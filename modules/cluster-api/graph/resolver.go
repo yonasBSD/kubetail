@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package graph implements the cluster-api GraphQL resolvers.
+//
+// Authentication is enforced upstream by the aggregation auth middleware:
+// every request reaching a resolver has already been verified via mTLS or
+// front-proxy, and the authenticated identity rides on the request context
+// as *k8shelpers.ImpersonateInfo. Per-request Kubernetes API calls run as
+// the originating user via the ImpersonatingRoundTripper, so resolvers do
+// not perform their own auth checks or token forwarding.
 package graph
 
 import (
-	"context"
-	"fmt"
-	"strings"
-
 	grpcdispatcher "github.com/kubetail-org/grpc-dispatcher-go"
 
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
-
-// This file will not be regenerated automatically.
-//
-// It serves as dependency injection for your app, add any dependencies you require here.
 
 //go:generate go run github.com/99designs/gqlgen generate
 
@@ -34,21 +34,4 @@ type Resolver struct {
 	cm                k8shelpers.ConnectionManager
 	grpcDispatcher    *grpcdispatcher.Dispatcher
 	allowedNamespaces []string
-}
-
-// getBearerTokenRequired returns the request-context bearer token, or an
-// error if none is set. Auth is enforced per-resolver (rather than via gin
-// middleware on the whole /graphql route) so graphiql can still issue
-// schema-introspection requests without authenticating.
-func (r *Resolver) getBearerTokenRequired(ctx context.Context) (string, error) {
-	var token string
-	if tokenValue, ok := ctx.Value(k8shelpers.K8STokenCtxKey).(string); ok {
-		token = strings.TrimSpace(tokenValue)
-	}
-
-	if token == "" {
-		return "", fmt.Errorf("token required")
-	}
-
-	return token, nil
 }

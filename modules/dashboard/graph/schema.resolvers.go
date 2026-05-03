@@ -484,10 +484,10 @@ func (r *queryResolver) CoreV1ServicesList(ctx context.Context, kubeContext *str
 }
 
 // ClusterAPIReadyWait is the resolver for the clusterAPIReadyWait field.
-func (r *queryResolver) ClusterAPIReadyWait(ctx context.Context, kubeContext *string, namespace *string, serviceName *string) (bool, error) {
+func (r *queryResolver) ClusterAPIReadyWait(ctx context.Context, kubeContext *string) (bool, error) {
 	kubeContextVal := r.cm.DerefKubeContext(kubeContext)
 
-	if err := r.hm.ReadyWait(ctx, kubeContextVal, namespace, serviceName); err != nil {
+	if err := r.hm.ReadyWait(ctx, kubeContextVal); err != nil {
 		return false, err
 	}
 
@@ -499,10 +499,10 @@ func (r *queryResolver) ClusterAPIReadyWait(ctx context.Context, kubeContext *st
 }
 
 // ClusterAPIHealthzGet is the resolver for the clusterAPIHealthzGet field.
-func (r *queryResolver) ClusterAPIHealthzGet(ctx context.Context, kubeContext *string, namespace *string, serviceName *string) (*model.HealthCheckResponse, error) {
+func (r *queryResolver) ClusterAPIHealthzGet(ctx context.Context, kubeContext *string) (*model.HealthCheckResponse, error) {
 	kubeContextVal := r.cm.DerefKubeContext(kubeContext)
 
-	status, err := r.hm.GetHealthStatus(ctx, kubeContextVal, namespace, serviceName)
+	status, err := r.hm.GetHealthStatus(ctx, kubeContextVal)
 	if err != nil {
 		return nil, err
 	}
@@ -511,27 +511,6 @@ func (r *queryResolver) ClusterAPIHealthzGet(ctx context.Context, kubeContext *s
 		Status:    healthCheckStatusFromClusterAPIHealthStatus(status),
 		Timestamp: time.Now().UTC(),
 	}, nil
-}
-
-// ClusterAPIServicesList is the resolver for the clusterAPIServicesList field.
-func (r *queryResolver) ClusterAPIServicesList(ctx context.Context, kubeContext *string, options *metav1.ListOptions) (*corev1.ServiceList, error) {
-	kubeContextVal := r.cm.DerefKubeContext(kubeContext)
-
-	// Reject requests not in desktop environment
-	if r.environment != sharedcfg.EnvironmentDesktop {
-		return nil, gqlerrors.ErrForbidden
-	}
-
-	// Restrict query to Cluster API services
-	opts := ptr.Deref(options, metav1.ListOptions{})
-	opts.LabelSelector = "app.kubernetes.io/name=kubetail,app.kubernetes.io/component=cluster-api"
-
-	outList := &corev1.ServiceList{}
-	if err := r.listResource(ctx, kubeContextVal, k8shelpers.BypassNamespaceCheck, &opts, outList); err != nil {
-		return nil, err
-	}
-
-	return outList, nil
 }
 
 // HelmListReleases is the resolver for the helmListReleases field.
@@ -959,7 +938,7 @@ func (r *subscriptionResolver) KubernetesAPIHealthzWatch(ctx context.Context, ku
 }
 
 // ClusterAPIReadyWait is the resolver for the clusterAPIReadyWait field.
-func (r *subscriptionResolver) ClusterAPIReadyWait(ctx context.Context, kubeContext *string, namespace *string, serviceName *string) (<-chan bool, error) {
+func (r *subscriptionResolver) ClusterAPIReadyWait(ctx context.Context, kubeContext *string) (<-chan bool, error) {
 	kubeContextVal := r.cm.DerefKubeContext(kubeContext)
 
 	outCh := make(chan bool)
@@ -968,7 +947,7 @@ func (r *subscriptionResolver) ClusterAPIReadyWait(ctx context.Context, kubeCont
 	go func() {
 		defer close(outCh)
 
-		if err := r.hm.ReadyWait(ctx, kubeContextVal, namespace, serviceName); err != nil {
+		if err := r.hm.ReadyWait(ctx, kubeContextVal); err != nil {
 			transport.AddSubscriptionError(ctx, gqlerrors.ErrInternalServerError)
 			return
 		}
@@ -980,10 +959,10 @@ func (r *subscriptionResolver) ClusterAPIReadyWait(ctx context.Context, kubeCont
 }
 
 // ClusterAPIHealthzWatch is the resolver for the clusterAPIHealthzWatch field.
-func (r *subscriptionResolver) ClusterAPIHealthzWatch(ctx context.Context, kubeContext *string, namespace *string, serviceName *string) (<-chan *model.HealthCheckResponse, error) {
+func (r *subscriptionResolver) ClusterAPIHealthzWatch(ctx context.Context, kubeContext *string) (<-chan *model.HealthCheckResponse, error) {
 	kubeContextVal := r.cm.DerefKubeContext(kubeContext)
 
-	statusCh, err := r.hm.WatchHealthStatus(ctx, kubeContextVal, namespace, serviceName)
+	statusCh, err := r.hm.WatchHealthStatus(ctx, kubeContextVal)
 	if err != nil {
 		return nil, err
 	}
@@ -1004,23 +983,6 @@ func (r *subscriptionResolver) ClusterAPIHealthzWatch(ctx context.Context, kubeC
 	}()
 
 	return outCh, nil
-}
-
-// ClusterAPIServicesWatch is the resolver for the clusterAPIServicesWatch field.
-func (r *subscriptionResolver) ClusterAPIServicesWatch(ctx context.Context, kubeContext *string, options *metav1.ListOptions) (<-chan *watch.Event, error) {
-	kubeContextVal := r.cm.DerefKubeContext(kubeContext)
-
-	// Reject requests not in desktop environment
-	if r.environment != sharedcfg.EnvironmentDesktop {
-		return nil, gqlerrors.ErrForbidden
-	}
-
-	// Restrict query
-	opts := ptr.Deref(options, metav1.ListOptions{})
-	opts.LabelSelector = "app.kubernetes.io/name=kubetail,app.kubernetes.io/component=cluster-api"
-
-	gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "services"}
-	return r.watchResourceMulti(ctx, kubeContextVal, k8shelpers.BypassNamespaceCheck, &opts, gvr)
 }
 
 // KubeConfigWatch is the resolver for the kubeConfigWatch field.

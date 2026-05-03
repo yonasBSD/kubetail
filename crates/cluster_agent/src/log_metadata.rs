@@ -127,7 +127,7 @@ impl LogMetadataService for LogMetadataImpl {
         &self,
         request: Request<LogMetadataListRequest>,
     ) -> Result<Response<LogMetadataList>, Status> {
-        let request_metadata = request.metadata().clone();
+        let identity = crate::auth::identity_from(&request)?;
         let request = request.into_inner();
 
         if !self.logs_dir.is_dir() {
@@ -147,7 +147,7 @@ impl LogMetadataService for LogMetadataImpl {
             .collect();
 
         self.authorizer
-            .is_authorized(&request_metadata, &namespaces, "get")
+            .is_authorized(&identity, &namespaces, "get")
             .await?;
 
         let mut files = ReadDirStream::new(read_dir(&self.logs_dir).await?);
@@ -205,7 +205,7 @@ impl LogMetadataService for LogMetadataImpl {
         &self,
         request: Request<LogMetadataWatchRequest>,
     ) -> Result<Response<Self::WatchStream>, Status> {
-        let request_metadata = request.metadata().clone();
+        let identity = crate::auth::identity_from(&request)?;
         let request = request.into_inner();
 
         let namespaces: Vec<String> = request
@@ -215,7 +215,7 @@ impl LogMetadataService for LogMetadataImpl {
             .collect();
 
         self.authorizer
-            .is_authorized(&request_metadata, &namespaces, "get")
+            .is_authorized(&identity, &namespaces, "get")
             .await?;
 
         let (log_metadata_watcher, log_metadata_rx) = LogMetadataWatcher::new(
@@ -235,16 +235,33 @@ impl LogMetadataService for LogMetadataImpl {
 
 #[cfg(test)]
 mod test {
-    use crate::authorizer::Authorizer;
+    use crate::auth::Identity;
+    use crate::authorizer::{AlwaysAllowReviewer, Authorizer};
     use crate::log_metadata::LogMetadataImpl;
     use serial_test::parallel;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::{Builder, NamedTempFile};
     use tokio_util::{sync::CancellationToken, task::TaskTracker};
     use tonic::Request;
     use types::cluster_agent::{
         LogMetadata, LogMetadataListRequest, log_metadata_service_server::LogMetadataService,
     };
+
+    fn test_authorizer() -> Authorizer {
+        Authorizer::with_reviewer(Arc::new(AlwaysAllowReviewer))
+    }
+
+    fn req_with_identity(payload: LogMetadataListRequest) -> Request<LogMetadataListRequest> {
+        let mut req = Request::new(payload);
+        req.extensions_mut().insert(Arc::new(Identity {
+            user: "test-user".into(),
+            groups: BTreeSet::new(),
+            extras: BTreeMap::new(),
+        }));
+        req
+    }
 
     pub fn create_test_file(name: &str, num_bytes: usize) -> NamedTempFile {
         let mut test_file = Builder::new()
@@ -265,7 +282,7 @@ mod test {
     async fn test_single_file_is_returned() {
         let file = create_test_file("pod-name_single-namespace_container-name-containerid", 4);
         let logs_dir = file.path().parent().unwrap().to_path_buf();
-        let authorizer = Authorizer::new().await.unwrap();
+        let authorizer = test_authorizer();
 
         let metadata_service = LogMetadataImpl::new(
             CancellationToken::new(),
@@ -275,7 +292,7 @@ mod test {
         );
 
         let mut result = metadata_service
-            .list(Request::new(LogMetadataListRequest {
+            .list(req_with_identity(LogMetadataListRequest {
                 namespaces: vec!["single-namespace".into()],
             }))
             .await
@@ -321,7 +338,7 @@ mod test {
             4,
         );
         let logs_dir = third_file.path().parent().unwrap().to_path_buf();
-        let authorizer = Authorizer::new().await.unwrap();
+        let authorizer = test_authorizer();
 
         let metadata_service = LogMetadataImpl::new(
             CancellationToken::new(),
@@ -331,7 +348,7 @@ mod test {
         );
 
         let mut result = metadata_service
-            .list(Request::new(LogMetadataListRequest {
+            .list(req_with_identity(LogMetadataListRequest {
                 namespaces: vec!["filter-firstnamespace".into()],
             }))
             .await
@@ -355,7 +372,7 @@ mod test {
         );
 
         let mut result = metadata_service
-            .list(Request::new(LogMetadataListRequest {
+            .list(req_with_identity(LogMetadataListRequest {
                 namespaces: vec!["filter-secondnamespace".into()],
             }))
             .await
@@ -385,7 +402,7 @@ mod test {
         );
 
         let logs_dir = first_file.path().parent().unwrap().to_path_buf();
-        let authorizer = Authorizer::new().await.unwrap();
+        let authorizer = test_authorizer();
 
         let metadata_service = LogMetadataImpl::new(
             CancellationToken::new(),
@@ -395,7 +412,7 @@ mod test {
         );
 
         let result = metadata_service
-            .list(Request::new(LogMetadataListRequest {
+            .list(req_with_identity(LogMetadataListRequest {
                 namespaces: Vec::new(),
             }))
             .await

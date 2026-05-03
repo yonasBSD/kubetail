@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 
+	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/proxy"
 
 	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
@@ -66,8 +67,54 @@ func (w *hijackTrackingResponseWriter) closeConn() {
 	}
 }
 
-// For parsing paths of the form /:kubeContext/:namespace/:serviceName/*relPath
-var desktopProxyPathRegex = regexp.MustCompile(`^/([^/]+)/([^/]+)/([^/]+)/(.*)$`)
+// For parsing paths of the form /:kubeContext/*relPath
+var desktopProxyPathRegex = regexp.MustCompile(`^/([^/]+)/(.*)$`)
+
+// rejectForbiddenUpgrade enforces the dashboard's CSWSH defenses on a
+// WebSocket upgrade request. Returns true (and writes a 403) when the
+// request is forbidden; non-upgrade requests pass through.
+//
+// Two checks: (1) Origin must be same-origin or allowlisted — Chrome omits
+// Sec-Fetch-Site on upgrades, so the app-level CSRF middleware can't gate
+// them. (2) X-Forwarded-CSRF-Token must be present — websocketCSRFContextMiddleware
+// strips client-supplied values and re-stamps only when the session has a
+// CSRF token, so absence here means a session-less browser request.
+func rejectForbiddenUpgrade(w http.ResponseWriter, r *http.Request, allowedOrigins []string) bool {
+	if r.Header.Get("Upgrade") == "" {
+		return false
+	}
+	if !httphelpers.IsAllowedOrigin(r, allowedOrigins) || r.Header.Get(httphelpers.HeaderForwardedCSRFToken) == "" {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return true
+	}
+	return false
+}
+
+// hasDotDotSegment reports whether p contains a ".." path segment. It must be
+// called before path.Join — once joined, ".." is normalized away and a crafted
+// proxy URL like /cluster-api-proxy/ctx/../../api/v1/pods could escape the
+// APIServicePath prefix and target arbitrary kube-apiserver endpoints with the
+// session bearer token or dashboard ServiceAccount fallback.
+func hasDotDotSegment(p string) bool {
+	for seg := range strings.SplitSeq(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// stripImpersonationHeaders removes any client-supplied Impersonate-* headers
+// so a caller can't ask kube-apiserver to act as another user/group. The
+// dashboard SA is not granted impersonate RBAC by default, but stripping
+// here is a belt-and-suspenders defense against future RBAC misconfiguration.
+func stripImpersonationHeaders(h http.Header) {
+	for k := range h {
+		if strings.HasPrefix(strings.ToLower(k), "impersonate-") {
+			h.Del(k)
+		}
+	}
+}
 
 // For parsing cookie paths
 var cookiepathRegex = regexp.MustCompile(`Path=[^;]*`)
@@ -85,7 +132,6 @@ type DesktopProxy struct {
 	pathPrefix     string
 	allowedOrigins []string
 	phCache        map[string]http.Handler
-	satCache       map[string]*k8shelpers.ServiceAccountToken
 	mu             sync.Mutex
 	shutdownCh     chan struct{}
 	wg             sync.WaitGroup
@@ -97,11 +143,7 @@ func (p *DesktopProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.wg.Add(1)
 	defer p.wg.Done()
 
-	// CSWSH defense for WebSocket upgrades. Chrome does not send
-	// Sec-Fetch-Site on upgrade requests, so the app-level CSRF middleware
-	// can't gate them; check Origin directly here instead.
-	if r.Header.Get("Upgrade") != "" && !httphelpers.IsAllowedOrigin(r, p.allowedOrigins) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if rejectForbiddenUpgrade(w, r, p.allowedOrigins) {
 		return
 	}
 
@@ -116,45 +158,42 @@ func (p *DesktopProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("did not understand url: %s", origPath), http.StatusInternalServerError)
 		return
 	}
-	kubeContext, namespace, serviceName, relPath := matches[1], matches[2], matches[3], matches[4]
+	kubeContext, relPath := matches[1], matches[2]
 
-	// Get Kubernetes proxy handler
+	if hasDotDotSegment(relPath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Get Kubernetes proxy handler. The handler authenticates against
+	// kube-apiserver using whatever credentials the kubeconfig supplies
+	// (typically the user's bearer token or client cert), so the
+	// aggregation auth path identifies the originating user.
 	h, err := p.getOrCreateKubernetesProxyHandler(kubeContext)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Re-write url
-	newPath := path.Join("/api/v1/namespaces", namespace, "services", fmt.Sprintf("%s:http", serviceName), "proxy", relPath)
-	if strings.HasSuffix(newPath, "/proxy") {
-		newPath += "/"
-	}
+	// Rewrite to the cluster-api's APIService path.
 	u := *r.URL
-	u.Path = newPath
+	u.Path = path.Join(APIServicePath, relPath)
 	r.URL = &u
-
-	// Get service-account-token
-	sat, err := p.getOrCreateServiceAccountToken(r.Context(), kubeContext, namespace)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Add token to authentication header
-	token, err := sat.Token(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	r.Header.Del("X-Forwarded-Authorization")
-	r.Header.Set("X-Forwarded-Authorization", fmt.Sprintf("Bearer %s", token))
 
 	// Strip the browser-supplied Origin so the cluster-api can treat its
 	// presence as a CSWSH signal. Cross-origin browser upgrades are already
 	// rejected by the same-origin gate above; cross-site non-upgrade browser
 	// requests are rejected by csrfProtectionMiddleware before reaching here.
 	r.Header.Del("Origin")
+
+	// Drop any client-supplied auth headers — kubectl proxy attaches its own
+	// based on the kubeconfig, and X-Forwarded-Authorization is no longer
+	// honored by the cluster-api.
+	r.Header.Del("Authorization")
+	r.Header.Del("X-Forwarded-Authorization")
+
+	// Drop client-supplied Impersonate-* headers — see stripImpersonationHeaders.
+	stripImpersonationHeaders(r.Header)
 
 	// Passthrough upgrade requests, closing the hijacked connection on shutdown
 	if r.Header.Get("Upgrade") != "" {
@@ -241,35 +280,6 @@ func (p *DesktopProxy) getOrCreateKubernetesProxyHandler(kubeContext string) (ht
 	return h, nil
 }
 
-// Get or create service-account-token
-func (p *DesktopProxy) getOrCreateServiceAccountToken(ctx context.Context, kubeContext string, namespace string) (*k8shelpers.ServiceAccountToken, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Generate cache key
-	k := fmt.Sprintf("%s/%s", kubeContext, namespace)
-
-	// Check cache
-	sat, exists := p.satCache[k]
-	if !exists {
-		clientset, err := p.cm.GetOrCreateClientset(kubeContext)
-		if err != nil {
-			return nil, err
-		}
-
-		// Initialize new service-account-token
-		sat, err = k8shelpers.NewServiceAccountToken(ctx, clientset, namespace, "kubetail-cli", p.shutdownCh)
-		if err != nil {
-			return nil, err
-		}
-
-		// Add to cache
-		p.satCache[k] = sat
-	}
-
-	return sat, nil
-}
-
 // Create new DesktopProxy. allowedOrigins is forwarded to the WebSocket
 // upgrade origin check (see httphelpers.IsAllowedOrigin).
 func NewDesktopProxy(cm k8shelpers.ConnectionManager, pathPrefix string, allowedOrigins []string) (*DesktopProxy, error) {
@@ -278,7 +288,6 @@ func NewDesktopProxy(cm k8shelpers.ConnectionManager, pathPrefix string, allowed
 		pathPrefix:     pathPrefix,
 		allowedOrigins: allowedOrigins,
 		phCache:        make(map[string]http.Handler),
-		satCache:       make(map[string]*k8shelpers.ServiceAccountToken),
 		shutdownCh:     make(chan struct{}),
 	}, nil
 }
@@ -297,10 +306,11 @@ func (p *InClusterProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.wg.Add(1)
 	defer p.wg.Done()
 
-	// CSWSH defense for WebSocket upgrades. Chrome does not send
-	// Sec-Fetch-Site on upgrade requests, so the app-level CSRF middleware
-	// can't gate them; check Origin directly here instead.
-	if r.Header.Get("Upgrade") != "" && !httphelpers.IsAllowedOrigin(r, p.allowedOrigins) {
+	if rejectForbiddenUpgrade(w, r, p.allowedOrigins) {
+		return
+	}
+
+	if hasDotDotSegment(r.URL.Path) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -343,10 +353,11 @@ func (p *InClusterProxy) DrainWithContext(ctx context.Context) error {
 	}
 }
 
-// Create new InClusterProxy with injectable transport (used in tests)
-func newInClusterProxy(clusterAPIEndpoint string, pathPrefix string, allowedOrigins []string, transport http.RoundTripper) (*InClusterProxy, error) {
-	// Parse endpoint url
-	endpointUrl, err := url.Parse(clusterAPIEndpoint)
+// newInClusterProxy creates an InClusterProxy with injectable transport (used in
+// tests). The endpoint must point at the kube-apiserver; aggregation forwards
+// the request to the cluster-api via the v1.api.kubetail.com APIService.
+func newInClusterProxy(kubeAPIServerEndpoint string, pathPrefix string, allowedOrigins []string, transport http.RoundTripper) (*InClusterProxy, error) {
+	endpointUrl, err := url.Parse(kubeAPIServerEndpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -354,15 +365,27 @@ func newInClusterProxy(clusterAPIEndpoint string, pathPrefix string, allowedOrig
 	// Init reverseProxy
 	reverseProxy := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {
-			// Re-write url
-			targetUrl := endpointUrl
-			targetUrl.Path = path.Join("/", strings.TrimPrefix(r.URL.Path, pathPrefix))
-			r.URL = targetUrl
+			// Rewrite to the cluster-api APIService path on the apiserver.
+			rel := strings.TrimPrefix(r.URL.Path, pathPrefix)
+			u := *endpointUrl // copy struct value so concurrent requests don't share state
+			u.Path = path.Join(APIServicePath, rel)
+			r.URL = &u
+			r.Host = ""
 
-			// Forward user token if present
-			if token, ok := r.Context().Value(k8shelpers.K8STokenCtxKey).(string); ok {
-				r.Header.Set("X-Forwarded-Authorization", fmt.Sprintf("Bearer %s", token))
+			// Drop client-supplied auth headers so a malicious upstream
+			// header can't ride through. If a session user's token is
+			// present, forward it as Authorization (kube-apiserver auths
+			// the caller as that user). Otherwise leave Authorization
+			// unset so the transport's BearerAuthRoundTripper falls back
+			// to the dashboard's own ServiceAccount credentials.
+			r.Header.Del("Authorization")
+			r.Header.Del("X-Forwarded-Authorization")
+			if token, ok := r.Context().Value(k8shelpers.K8STokenCtxKey).(string); ok && token != "" {
+				r.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 			}
+
+			// Drop client-supplied Impersonate-* headers — see stripImpersonationHeaders.
+			stripImpersonationHeaders(r.Header)
 
 			// Strip the browser-supplied Origin so the cluster-api can treat its
 			// presence as a CSWSH signal. Cross-origin browser upgrades are
@@ -398,12 +421,24 @@ func newInClusterProxy(clusterAPIEndpoint string, pathPrefix string, allowedOrig
 	}, nil
 }
 
-// Create new InClusterProxy. allowedOrigins is forwarded to the WebSocket
-// upgrade origin check (see httphelpers.IsAllowedOrigin).
-func NewInClusterProxy(clusterAPIEndpoint string, pathPrefix string, allowedOrigins []string) (*InClusterProxy, error) {
-	rt, err := k8shelpers.NewInClusterSATRoundTripper(http.DefaultTransport)
+// Create new InClusterProxy. The kube-apiserver endpoint is read from the
+// connection manager's REST config; the proxy rewrites incoming requests to
+// the cluster-api APIService path on the apiserver. allowedOrigins is
+// forwarded to the WebSocket upgrade origin check (see httphelpers.IsAllowedOrigin).
+func NewInClusterProxy(cm k8shelpers.ConnectionManager, pathPrefix string, allowedOrigins []string) (*InClusterProxy, error) {
+	restConfig, err := cm.GetOrCreateRestConfig("")
 	if err != nil {
 		return nil, err
 	}
-	return newInClusterProxy(clusterAPIEndpoint, pathPrefix, allowedOrigins, rt)
+
+	// Build a transport using the dashboard's own credentials (its
+	// ServiceAccount). When the Director sets Authorization from a user-
+	// supplied bearer token, client-go's BearerAuthRoundTripper leaves it
+	// alone; otherwise the SA token is injected as a fallback so requests
+	// authenticate as the dashboard itself.
+	transport, err := rest.TransportFor(restConfig)
+	if err != nil {
+		return nil, err
+	}
+	return newInClusterProxy(restConfig.Host, pathPrefix, allowedOrigins, transport)
 }

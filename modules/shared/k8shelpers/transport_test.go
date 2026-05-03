@@ -44,6 +44,58 @@ func TestBearerTokenRoundTripper_headerSet(t *testing.T) {
 	assert.Nil(t, err)
 }
 
+func TestImpersonatingRoundTripper(t *testing.T) {
+	cases := []struct {
+		name      string
+		info      *ImpersonateInfo
+		wantUser  string
+		wantGroup []string
+		wantExtra map[string][]string
+	}{
+		{
+			name: "no impersonation info -> no headers",
+		},
+		{
+			name:     "user only",
+			info:     &ImpersonateInfo{User: "alice"},
+			wantUser: "alice",
+		},
+		{
+			name:      "user + groups + extras",
+			info:      &ImpersonateInfo{User: "bob", Groups: []string{"devs", "sre"}, Extras: map[string][]string{"scopes": {"openid", "profile"}}},
+			wantUser:  "bob",
+			wantGroup: []string{"devs", "sre"},
+			wantExtra: map[string][]string{"scopes": {"openid", "profile"}},
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			var captured http.Header
+			inner := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				captured = req.Header.Clone()
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+			})
+			rt := NewImpersonatingRoundTripper(inner)
+
+			req, err := http.NewRequest("GET", "http://example.com", nil)
+			assert.NoError(t, err)
+			if tt.info != nil {
+				req = req.WithContext(context.WithValue(req.Context(), K8SImpersonateCtxKey, tt.info))
+			}
+
+			_, err = rt.RoundTrip(req)
+			assert.NoError(t, err)
+
+			assert.Equal(t, tt.wantUser, captured.Get("Impersonate-User"))
+			assert.Equal(t, tt.wantGroup, captured.Values("Impersonate-Group"))
+			for k, want := range tt.wantExtra {
+				assert.Equal(t, want, captured.Values("Impersonate-Extra-"+k))
+			}
+		})
+	}
+}
+
 func TestInClusterSATRoundTripper_getTokenUsesCache(t *testing.T) {
 	rt := &InClusterSATRoundTripper{
 		path:        "does-not-exist",

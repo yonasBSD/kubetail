@@ -66,8 +66,6 @@ func newTestDownloadHandlers(records []logs.LogRecord, captured *[]logs.Option) 
 
 func mountDownloadHandler(h *downloadHandlers) *gin.Engine {
 	r := gin.New()
-	r.Use(authenticationMiddleware)
-	r.Use(requireTokenMiddleware)
 	r.POST("/api/v1/download", h.DownloadPOST)
 	return r
 }
@@ -83,21 +81,12 @@ func baseDownloadForm() url.Values {
 	}
 }
 
-func postDownload(engine *gin.Engine, form url.Values, withBearer bool) *httptest.ResponseRecorder {
+func postDownload(engine *gin.Engine, form url.Values) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/v1/download", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if withBearer {
-		r.Header.Set("Authorization", "Bearer test-token")
-	}
 	engine.ServeHTTP(w, r)
 	return w
-}
-
-func TestDownloadRequiresBearerToken(t *testing.T) {
-	engine := mountDownloadHandler(newTestDownloadHandlers(nil, nil))
-	w := postDownload(engine, baseDownloadForm(), false)
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func TestDownloadHappyPathTSV(t *testing.T) {
@@ -114,7 +103,7 @@ func TestDownloadHappyPathTSV(t *testing.T) {
 	form.Del("columns")
 	form["columns"] = []string{"timestamp", "pod", "message"}
 
-	w := postDownload(engine, form, true)
+	w := postDownload(engine, form)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "text/tab-separated-values; charset=utf-8", w.Header().Get("Content-Type"))
@@ -131,7 +120,7 @@ func TestDownloadInvalidFormFails(t *testing.T) {
 	engine := mountDownloadHandler(newTestDownloadHandlers(nil, nil))
 	form := baseDownloadForm()
 	form.Set("mode", "INVALID")
-	w := postDownload(engine, form, true)
+	w := postDownload(engine, form)
 	assert.Equal(t, http.StatusUnprocessableEntity, w.Code)
 }
 
@@ -157,9 +146,9 @@ func TestDownloadIgnoresKubeContextFromForm(t *testing.T) {
 	formWith := baseDownloadForm()
 	formWith.Set("kubeContext", "some-ctx")
 
-	w1 := postDownload(mountDownloadHandler(with), formWith, true)
+	w1 := postDownload(mountDownloadHandler(with), formWith)
 	assert.Equal(t, http.StatusOK, w1.Code)
-	w2 := postDownload(mountDownloadHandler(without), baseDownloadForm(), true)
+	w2 := postDownload(mountDownloadHandler(without), baseDownloadForm())
 	assert.Equal(t, http.StatusOK, w2.Code)
 
 	assert.Equal(t, withoutCount, withCount, "kubeContext form field must not add a WithKubeContext option")
@@ -181,9 +170,9 @@ func TestDownloadAppliesAllowedNamespaces(t *testing.T) {
 		},
 	}
 
-	w1 := postDownload(mountDownloadHandler(with), baseDownloadForm(), true)
+	w1 := postDownload(mountDownloadHandler(with), baseDownloadForm())
 	assert.Equal(t, http.StatusOK, w1.Code)
-	w2 := postDownload(mountDownloadHandler(without), baseDownloadForm(), true)
+	w2 := postDownload(mountDownloadHandler(without), baseDownloadForm())
 	assert.Equal(t, http.StatusOK, w2.Code)
 
 	// allowedNamespaces adds exactly one option (WithAllowedNamespaces).

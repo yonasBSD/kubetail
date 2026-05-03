@@ -1,0 +1,10 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "Kubetail Cluster API",
+    "version": "v1"
+  },
+  "basePath": "/apis/api.kubetail.com/v1",
+  "paths": {},
+  "definitions": {}
+}

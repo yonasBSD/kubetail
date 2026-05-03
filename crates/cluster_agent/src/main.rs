@@ -16,6 +16,7 @@ use std::error::Error;
 use std::fs::read_to_string;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use clap::{ArgAction, arg, command, value_parser};
 use tokio::signal::ctrl_c;
@@ -28,6 +29,7 @@ use types::cluster_agent::FILE_DESCRIPTOR_SET;
 use types::cluster_agent::log_metadata_service_server::LogMetadataServiceServer;
 use types::cluster_agent::log_records_service_server::LogRecordsServiceServer;
 
+mod auth;
 mod authorizer;
 mod config;
 mod log_metadata;
@@ -40,7 +42,7 @@ use crate::config::{Config, LoggingConfig, TlsConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let config = parse_config().await?;
+    let mut config = parse_config().await?;
 
     configure_logging(&config.logging)?;
 
@@ -53,25 +55,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let task_tracker = TaskTracker::new();
     let root_ctx = CancellationToken::new();
 
-    let mut server = enable_tls(Server::builder(), &config.tls)?;
+    let mut server = configure_tls(Server::builder(), &config.tls)?;
 
     info!("Starting cluster-agent on {}", config.address);
+
+    let allowed_names = Arc::new(std::mem::take(&mut config.tls.allowed_names));
+    let log_metadata_svc = LogMetadataServiceServer::with_interceptor(
+        LogMetadataImpl::new(
+            root_ctx.clone(),
+            task_tracker.clone(),
+            config.logs_dir.clone(),
+            authorizer.clone(),
+        ),
+        auth::interceptor(allowed_names.clone()),
+    );
+    let log_records_svc = LogRecordsServiceServer::with_interceptor(
+        LogRecordsImpl::new(
+            root_ctx.clone(),
+            task_tracker.clone(),
+            config.logs_dir.clone(),
+            authorizer.clone(),
+        ),
+        auth::interceptor(allowed_names.clone()),
+    );
 
     server
         .add_service(agent_health_service)
         .add_service(reflection_service)
-        .add_service(LogMetadataServiceServer::new(LogMetadataImpl::new(
-            root_ctx.clone(),
-            task_tracker.clone(),
-            config.logs_dir.clone(),
-            authorizer.clone(),
-        )))
-        .add_service(LogRecordsServiceServer::new(LogRecordsImpl::new(
-            root_ctx.clone(),
-            task_tracker.clone(),
-            config.logs_dir.clone(),
-            authorizer.clone(),
-        )))
+        .add_service(log_metadata_svc)
+        .add_service(log_records_svc)
         .serve_with_shutdown(config.address, shutdown(root_ctx))
         .await?;
 
@@ -128,40 +140,14 @@ fn parse_overrides(param: &str) -> Result<(String, String), String> {
     }
 }
 
-fn enable_tls(server: Server, tls_config: &TlsConfig) -> Result<Server, Box<dyn Error>> {
-    if !tls_config.enabled {
-        return Ok(server);
-    }
+fn configure_tls(server: Server, tls_config: &TlsConfig) -> Result<Server, Box<dyn Error>> {
+    let cert = read_to_string(&tls_config.cert_file)?;
+    let key = read_to_string(&tls_config.key_file)?;
+    let ca = read_to_string(&tls_config.ca_file)?;
 
-    let cert_file = tls_config
-        .cert_file
-        .as_ref()
-        .ok_or("TLS cert file path is required when TLS is enabled")?;
-    let key_file = tls_config
-        .key_file
-        .as_ref()
-        .ok_or("TLS key file path is required when TLS is enabled")?;
-    let cert = read_to_string(cert_file)?;
-    let key = read_to_string(key_file)?;
-
-    let server_identity = Identity::from_pem(cert, key);
-
-    let mut server_tls_config = ServerTlsConfig::new().identity(server_identity);
-
-    #[allow(clippy::collapsible_if)]
-    if let Some(client_auth) = &tls_config.client_auth {
-        if client_auth == "require-and-verify" {
-            let ca_file = tls_config
-                .ca_file
-                .as_ref()
-                .ok_or("TLS CA file path is required for client verification")?;
-            let client_ca_cert = read_to_string(ca_file)?;
-
-            let client_ca_cert = Certificate::from_pem(client_ca_cert);
-
-            server_tls_config = server_tls_config.client_ca_root(client_ca_cert);
-        }
-    }
+    let server_tls_config = ServerTlsConfig::new()
+        .identity(Identity::from_pem(cert, key))
+        .client_ca_root(Certificate::from_pem(ca));
 
     server.tls_config(server_tls_config).map_err(Into::into)
 }

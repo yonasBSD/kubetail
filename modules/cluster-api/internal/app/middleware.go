@@ -16,75 +16,184 @@ package app
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
-	"github.com/kubetail-org/kubetail/modules/cluster-api/graph"
-	"github.com/kubetail-org/kubetail/modules/shared/ginhelpers"
-	"github.com/kubetail-org/kubetail/modules/shared/grpchelpers"
-	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
+	"github.com/kubetail-org/kubetail/modules/cluster-api/internal/helpers"
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
 
-// Add user to context if authenticated
-func authenticationMiddleware(c *gin.Context) {
-	var token string
-
-	// Check X-Forwarded-Authorization & Authorization headers
-	header := c.GetHeader("X-Forwarded-Authorization")
-	if header == "" {
-		header = c.GetHeader("Authorization")
-	}
-	if strings.HasPrefix(header, "Bearer ") {
-		token = strings.TrimPrefix(header, "Bearer ")
-	}
-
-	// Trim at the trust boundary so consumers can rely on a simple `token == ""`
-	// presence check; otherwise a whitespace-only bearer header would slip past
-	// any gate that doesn't itself trim.
-	token = strings.TrimSpace(token)
-
-	// Add to context for kubernetes requests
-	if token != "" {
-		ctx := context.WithValue(c.Request.Context(), k8shelpers.K8STokenCtxKey, token)
-		c.Request = c.Request.WithContext(ctx)
-	}
-
-	// Add to context for gRPC requests
-	if token != "" {
-		ctx := context.WithValue(c.Request.Context(), grpchelpers.K8STokenCtxKey, token)
-		c.Request = c.Request.WithContext(ctx)
-	}
-
-	// Continue
-	c.Next()
+// setImpersonateOnRequest writes the authenticated identity to the request
+// context for ImpersonatingRoundTripper.
+func setImpersonateOnRequest(c *gin.Context, info *k8shelpers.ImpersonateInfo) {
+	ctx := context.WithValue(c.Request.Context(), k8shelpers.K8SImpersonateCtxKey, info)
+	c.Request = c.Request.WithContext(ctx)
 }
 
-// forwardedCSRFTokenMiddleware copies X-Forwarded-CSRF-Token (set by the
-// dashboard reverse proxy when forwarding browser upgrades) into the request
-// context so the GraphQL WebSocket InitFunc can validate connection_init.
-func forwardedCSRFTokenMiddleware(c *gin.Context) {
-	if !ginhelpers.IsWebSocketRequest(c) {
+// aggregationAuthConfig holds the parsed contents of kube-system's
+// extension-apiserver-authentication ConfigMap. Built once at startup; each
+// request only does cert verification + header reads.
+//
+// AllowedNames is the `requestheader-allowed-names` allowlist; an empty list
+// means any front-proxy CN is accepted (matches kube-apiserver behavior).
+type aggregationAuthConfig struct {
+	ProxyCAs             *x509.CertPool
+	AllowedNames         []string
+	UsernameHeaders      []string
+	GroupHeaders         []string
+	ExtraHeadersPrefixes []string
+}
+
+// newAggregationAuthMiddleware authenticates the caller as the kube-apiserver
+// front-proxy (proxy CA + request headers). Direct mTLS from any other holder
+// of a cluster cert is rejected — the cluster-api accepts requests only via
+// the kube-apiserver chain. The authenticated identity lands on the request
+// context as *k8shelpers.ImpersonateInfo.
+func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		r := c.Request
+
+		// The listener is fixed at RequestClientCert so probes and discovery
+		// routes can complete a handshake without a cert; this middleware is
+		// the actual enforcement point that a peer cert is present.
+		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "client certificate required"})
+			return
+		}
+
+		now := time.Now()
+
+		// The TLS handshake only proves possession of the private key for the
+		// leaf (PeerCertificates[0]); the rest of the slice is unauthenticated
+		// chain material the client supplied. Verifying any cert from the slice
+		// would let an attacker append a trusted CA/intermediate as a "chain"
+		// entry and have it accepted as the proxy identity.
+		var proxyCert *x509.Certificate
+		if cfg.ProxyCAs != nil {
+			opts := x509.VerifyOptions{
+				Roots:       cfg.ProxyCAs,
+				CurrentTime: now,
+				KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			}
+			if len(r.TLS.PeerCertificates) > 1 {
+				opts.Intermediates = x509.NewCertPool()
+				for _, cert := range r.TLS.PeerCertificates[1:] {
+					opts.Intermediates.AddCert(cert)
+				}
+			}
+			leaf := r.TLS.PeerCertificates[0]
+			if _, err := leaf.Verify(opts); err == nil {
+				proxyCert = leaf
+			}
+		}
+		if proxyCert == nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "no valid certificate found"})
+			return
+		}
+
+		if len(cfg.AllowedNames) > 0 {
+			cn := proxyCert.Subject.CommonName
+			if !slices.Contains(cfg.AllowedNames, cn) {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error": fmt.Sprintf("proxy CN %q not in allowed list", cn),
+				})
+				return
+			}
+		}
+
+		var user string
+		for _, h := range cfg.UsernameHeaders {
+			if v := c.GetHeader(h); v != "" {
+				user = v
+				break
+			}
+		}
+		if user == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing user header"})
+			return
+		}
+
+		// kube-apiserver emits one X-Remote-Group header per group via
+		// http.Header.Add. Use Values to read all of them — Get/GetHeader
+		// returns only the first, which silently drops the rest and breaks
+		// any RBAC binding whose subject isn't on the first group.
+		var groups []string
+		for _, h := range cfg.GroupHeaders {
+			if vals := r.Header.Values(h); len(vals) > 0 {
+				groups = append(groups, vals...)
+				break
+			}
+		}
+
+		// Request-header extra prefixes are case-insensitive (kube-apiserver
+		// behavior); incoming header map keys are canonicalized by net/http,
+		// so a lowercase configured prefix (e.g. "x-remote-extra-") would
+		// never match a sensitive CutPrefix against "X-Remote-Extra-Foo".
+		var extras map[string][]string
+		if len(cfg.ExtraHeadersPrefixes) > 0 {
+			for name, vals := range r.Header {
+				lname := strings.ToLower(name)
+				for _, prefix := range cfg.ExtraHeadersPrefixes {
+					if after, ok := strings.CutPrefix(lname, strings.ToLower(prefix)); ok {
+						if extras == nil {
+							extras = map[string][]string{}
+						}
+						extras[after] = vals
+					}
+				}
+			}
+		}
+
+		setImpersonateOnRequest(c, &k8shelpers.ImpersonateInfo{
+			User:   user,
+			Groups: groups,
+			Extras: extras,
+		})
+
 		c.Next()
-		return
 	}
-	if tok := c.GetHeader(httphelpers.HeaderForwardedCSRFToken); tok != "" {
-		ctx := context.WithValue(c.Request.Context(), graph.SessionCSRFTokenCtxKey, tok)
-		c.Request = c.Request.WithContext(ctx)
-	}
-	c.Next()
 }
 
-// requireTokenMiddleware aborts with 401 when no bearer token reached the
-// request context. Pair with authenticationMiddleware (which extracts the
-// token from headers) so all dynamic routes share a single auth check.
-func requireTokenMiddleware(c *gin.Context) {
-	token, _ := c.Request.Context().Value(k8shelpers.K8STokenCtxKey).(string)
-	if strings.TrimSpace(token) == "" {
-		c.AbortWithStatus(http.StatusUnauthorized)
-		return
+// loadAggregationAuthConfig reads kube-system's
+// extension-apiserver-authentication ConfigMap and returns a parsed
+// aggregationAuthConfig. The kube-apiserver maintains this ConfigMap; any
+// service registered as an APIService is expected to read it for its
+// front-proxy CA + request-header configuration.
+func loadAggregationAuthConfig(ctx context.Context, cs kubernetes.Interface) (*aggregationAuthConfig, error) {
+	cm, err := cs.CoreV1().ConfigMaps("kube-system").Get(ctx, "extension-apiserver-authentication", metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("read extension-apiserver-authentication: %w", err)
 	}
-	c.Next()
+
+	proxyCAs, err := helpers.PoolFromPEM(cm.Data["requestheader-client-ca-file"])
+	if err != nil {
+		return nil, fmt.Errorf("requestheader-client-ca-file in extension-apiserver-authentication: %w", err)
+	}
+
+	out := &aggregationAuthConfig{ProxyCAs: proxyCAs}
+	for _, f := range []struct {
+		key string
+		dst *[]string
+	}{
+		{"requestheader-allowed-names", &out.AllowedNames},
+		{"requestheader-username-headers", &out.UsernameHeaders},
+		{"requestheader-group-headers", &out.GroupHeaders},
+		{"requestheader-extra-headers-prefix", &out.ExtraHeadersPrefixes},
+	} {
+		if raw := cm.Data[f.key]; raw != "" {
+			if err := json.Unmarshal([]byte(raw), f.dst); err != nil {
+				return nil, fmt.Errorf("parse %s: %w", f.key, err)
+			}
+		}
+	}
+	return out, nil
 }

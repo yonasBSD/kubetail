@@ -40,7 +40,12 @@ import { ClusterAPIProxyPathInput, clusterAPIProxyPath, getBasename, joinPaths }
 import { PageContext, ViewerColumn, viewerColumnToBackend } from './shared';
 import { visibleColsAtom } from './state';
 
-const DOWNLOAD_PATH = 'api/v1/download';
+// The dashboard serves the legacy form-POST endpoint at `/api/v1/download`.
+// The cluster-api exposes the same endpoint as the `download` subresource of
+// its aggregated APIService (`/apis/api.kubetail.com/v1/download`), reached
+// through the dashboard's cluster-api proxy.
+const DASHBOARD_DOWNLOAD_PATH = 'api/v1/download';
+const CLUSTER_API_DOWNLOAD_PATH = 'download';
 
 /**
  * Types
@@ -153,8 +158,8 @@ export type DownloadEndpointInput = ClusterAPIProxyPathInput & {
 };
 
 export function getDownloadActionURL(input: DownloadEndpointInput): string {
-  if (input.shouldUseClusterAPI) return clusterAPIProxyPath(input, DOWNLOAD_PATH);
-  return joinPaths(input.basename, DOWNLOAD_PATH);
+  if (input.shouldUseClusterAPI) return clusterAPIProxyPath(input, CLUSTER_API_DOWNLOAD_PATH);
+  return joinPaths(input.basename, DASHBOARD_DOWNLOAD_PATH);
 }
 
 /**

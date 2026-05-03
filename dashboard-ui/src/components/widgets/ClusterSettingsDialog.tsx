@@ -20,20 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import appConfig from '@/app-config';
 import ClusterAPIInstallButton from '@/components/widgets/ClusterAPIInstallButton';
 import KubeContextPicker from '@/components/widgets/KubeContextPicker';
-import { CLUSTER_API_SERVICES_LIST_FETCH, CLUSTER_API_SERVICES_LIST_WATCH } from '@/lib/graphql/dashboard/ops';
-import type { ClusterApiServicesListItemFragmentFragment } from '@/lib/graphql/dashboard/__generated__/graphql';
-import { useListQueryWithSubscription } from '@/lib/hooks';
-
-/**
- * generateServiceUrl
- */
-
-const generateServiceUrl = (service: ClusterApiServicesListItemFragmentFragment) => {
-  const { ports } = service.spec;
-  const appProtocol = ports.length ? ports[0].appProtocol : 'http';
-  const port = ports.length ? ports[0].port : 'http';
-  return `${appProtocol}://${service.metadata.name}.${service.metadata.namespace}.svc:${port}`;
-};
+import { Status, useClusterAPIServerStatus } from '@/lib/server-status';
 
 /**
  * ClusterAPIPickerDesktop component
@@ -44,40 +31,22 @@ type ClusterAPIPickerDesktopProps = {
 };
 
 const ClusterAPIPickerDesktop = ({ kubeContext }: ClusterAPIPickerDesktopProps) => {
-  const { loading, data } = useListQueryWithSubscription({
-    skip: kubeContext === null,
-    query: CLUSTER_API_SERVICES_LIST_FETCH,
-    subscription: CLUSTER_API_SERVICES_LIST_WATCH,
-    queryDataKey: 'clusterAPIServicesList',
-    subscriptionDataKey: 'clusterAPIServicesWatch',
-    variables: { kubeContext },
-  });
+  const serverStatus = useClusterAPIServerStatus(kubeContext ?? '');
 
-  const services = data?.clusterAPIServicesList?.items;
-
-  if (kubeContext === null || loading) {
+  if (kubeContext === null) {
     return <div className="h-10 leading-10">Loading...</div>;
   }
 
-  // Check if kubetail is installed in default place
-  let clusterAPIEndpoint = '';
-  services?.forEach((service) => {
-    if (service.metadata.namespace === 'kubetail-system' && service.metadata.name === 'kubetail-cluster-api') {
-      clusterAPIEndpoint = generateServiceUrl(service);
-    }
-  });
+  // Unknown is the pre-first-update state; render Loading to avoid flicker.
+  if (serverStatus.status === Status.Unknown) {
+    return <div className="h-10 leading-10">Loading...</div>;
+  }
 
-  return (
-    <>
-      {clusterAPIEndpoint ? (
-        <div>{clusterAPIEndpoint}</div>
-      ) : (
-        <div>
-          <ClusterAPIInstallButton kubeContext={kubeContext} />
-        </div>
-      )}
-    </>
-  );
+  if (serverStatus.status === Status.NotFound) {
+    return <ClusterAPIInstallButton kubeContext={kubeContext} />;
+  }
+
+  return <div>/apis/api.kubetail.com/v1</div>;
 };
 
 /**
@@ -85,13 +54,13 @@ const ClusterAPIPickerDesktop = ({ kubeContext }: ClusterAPIPickerDesktopProps) 
  */
 
 const ClusterAPIPickerCluster = () => (
-  <Select value={appConfig.clusterAPIEndpoint ? 'enabled' : 'disabled'} disabled>
+  <Select value={appConfig.clusterAPIEnabled ? 'enabled' : 'disabled'} disabled>
     <SelectTrigger>
       <SelectValue />
     </SelectTrigger>
     <SelectContent>
-      {appConfig.clusterAPIEndpoint ? (
-        <SelectItem value="enabled">{appConfig.clusterAPIEndpoint}</SelectItem>
+      {appConfig.clusterAPIEnabled ? (
+        <SelectItem value="enabled">/apis/api.kubetail.com/v1</SelectItem>
       ) : (
         <SelectItem value="disabled">Disabled</SelectItem>
       )}

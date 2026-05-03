@@ -32,6 +32,7 @@ import (
 	"github.com/kubetail-org/kubetail/modules/shared/logging"
 
 	"github.com/kubetail-org/kubetail/modules/cluster-api/internal/app"
+	"github.com/kubetail-org/kubetail/modules/cluster-api/internal/helpers"
 	"github.com/kubetail-org/kubetail/modules/cluster-api/pkg/config"
 )
 
@@ -92,12 +93,14 @@ func main() {
 				zlog.Fatal().Caller().Err(err).Send()
 			}
 
-			// Create server
+			// Listener is fixed at TLS 1.2 + RequestClientCert; the auth
+			// middleware is the actual auth boundary.
 			server := &http.Server{
 				Addr:        cfg.Addr,
 				Handler:     app,
 				IdleTimeout: 1 * time.Minute,
 				ReadTimeout: 5 * time.Second,
+				TLSConfig:   helpers.BuildTLSConfig(),
 			}
 
 			// Register shutdown hook so long-lived connections are notified before
@@ -106,16 +109,8 @@ func main() {
 
 			// Run server in goroutine
 			go func() {
-				var serverErr error
 				zlog.Info().Msg("Starting server on " + cfg.Addr)
-
-				if cfg.TLS.Enabled {
-					serverErr = server.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile)
-				} else {
-					serverErr = server.ListenAndServe()
-				}
-
-				// log non-normal errors
+				serverErr := server.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile)
 				if serverErr != nil && serverErr != http.ErrServerClosed {
 					zlog.Fatal().Caller().Err(serverErr).Send()
 				}

@@ -107,8 +107,9 @@ func NewApp(cfg *config.Config) (*App, error) {
 	// Routes
 	root := app.Group(cfg.BasePath)
 
-	// Dynamic routes
-	dynamicRoutes := root.Group("/")
+	// Dynamic routes mount under the Kubernetes API extension group/version
+	// so the cluster-api can be aggregated into kube-apiserver.
+	dynamicRoutes := root.Group("/apis/api.kubetail.com/v1")
 	{
 		// https://security.stackexchange.com/questions/147554/security-headers-for-a-web-api
 		// https://observatory.mozilla.org/faq/
@@ -119,19 +120,32 @@ func NewApp(cfg *config.Config) (*App, error) {
 			ContentTypeNosniff:    true,
 		}))
 
-		// authentication middleware (extracts the bearer token if present);
-		// individual routes decide whether absence is a 401 (e.g. /api/v1/download)
-		// or only a per-resolver concern (e.g. /graphql, where introspection
-		// must remain reachable for graphiql)
-		dynamicRoutes.Use(authenticationMiddleware)
+		// Aggregation-layer authentication. Skipped in test mode because the
+		// loader needs a live Kubernetes cluster (kube-system's
+		// extension-apiserver-authentication ConfigMap).
+		if gin.Mode() != gin.TestMode {
+			clientset, err := app.cm.GetOrCreateClientset("")
+			if err != nil {
+				return nil, err
+			}
+			authCfg, err := loadAggregationAuthConfig(context.TODO(), clientset)
+			if err != nil {
+				return nil, err
+			}
+			dynamicRoutes.Use(newAggregationAuthMiddleware(authCfg))
+		}
+
+		// Mirrored under the aggregated path so the dashboard cluster-api proxy
+		// can reach it; kube-apiserver only forwards /apis/<group>/<version>/...
+		dynamicRoutes.GET("/healthz", healthzHandler)
 
 		// GraphQL endpoint
 		app.graphqlServer = graph.NewServer(app.cm, app.grpcDispatcher, cfg.AllowedNamespaces)
-		dynamicRoutes.Any("/graphql", forwardedCSRFTokenMiddleware, gin.WrapH(app.graphqlServer))
+		dynamicRoutes.Any("/graphql", gin.WrapH(app.graphqlServer))
 
 		// Log download endpoint
 		dl := newDownloadHandlers(app.cm, app.grpcDispatcher, cfg.AllowedNamespaces)
-		dynamicRoutes.POST("/api/v1/download", requireTokenMiddleware, dl.DownloadPOST)
+		dynamicRoutes.POST("/download", dl.DownloadPOST)
 	}
 	app.dynamicRoutes = dynamicRoutes // for unit tests
 
@@ -141,11 +155,11 @@ func NewApp(cfg *config.Config) (*App, error) {
 	})
 
 	// Health endpoint
-	root.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status": "ok",
-		})
-	})
+	root.GET("/healthz", healthzHandler)
+
+	// Kubernetes API extension discovery endpoints
+	root.GET("/apis", extGroupDiscoveryHandler)
+	root.GET("/apis/api.kubetail.com/v1", extVersionDiscoveryHandler)
 
 	// Init staticFS
 	sub, err := fs.Sub(clusterapi.StaticEmbedFS, "static")
@@ -153,6 +167,11 @@ func NewApp(cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 	staticFS := http.FS(sub)
+
+	// OpenAPI endpoints (kube-apiserver fetches these once the APIService is aggregated)
+	root.StaticFileFS("/openapi/v2", "/swagger.json", staticFS)
+	root.GET("/openapi/v3", openapiV3IndexHandler)
+	root.GET("/openapi/v3/apis/api.kubetail.com/v1", openapiV3GroupVersionHandler)
 
 	// GraphQL Playground
 	root.StaticFileFS("/graphiql", "/graphiql.html", staticFS)

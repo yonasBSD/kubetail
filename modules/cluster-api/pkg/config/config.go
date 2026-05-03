@@ -16,12 +16,23 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/spf13/viper"
 )
+
+// removedTLSKeys are config keys we used to honor but no longer accept. We
+// surface a targeted error instead of silently ignoring them so operators
+// notice the migration. See PR description for the rationale.
+var removedTLSKeys = []string{
+	"cluster-agent.tls.enabled",
+	"tls.client-auth-type",
+	"tls.client-ca-file",
+	"tls.enabled",
+}
 
 // Represents the Cluster API configuration
 type Config struct {
@@ -35,10 +46,9 @@ type Config struct {
 	ClusterAgent struct {
 		DispatchUrl string `mapstructure:"dispatch-url"`
 		TLS         struct {
-			Enabled    bool
-			CertFile   string `mapstructure:"cert-file" validate:"omitempty,file"`
-			KeyFile    string `mapstructure:"key-file" validate:"omitempty,file"`
-			CAFile     string `mapstructure:"ca-file" validate:"omitempty,file"`
+			CertFile   string `mapstructure:"cert-file" validate:"required,file"`
+			KeyFile    string `mapstructure:"key-file" validate:"required,file"`
+			CAFile     string `mapstructure:"ca-file" validate:"required,file"`
 			ServerName string `mapstructure:"server-name"`
 		}
 	} `mapstructure:"cluster-agent"`
@@ -55,9 +65,8 @@ type Config struct {
 	}
 
 	TLS struct {
-		Enabled  bool
-		CertFile string `mapstructure:"cert-file" validate:"omitempty,file"`
-		KeyFile  string `mapstructure:"key-file" validate:"omitempty,file"`
+		CertFile string `mapstructure:"cert-file" validate:"required,file"`
+		KeyFile  string `mapstructure:"key-file" validate:"required,file"`
 	}
 }
 
@@ -75,7 +84,6 @@ func DefaultConfig() *Config {
 	cfg.GinMode = "release"
 
 	cfg.ClusterAgent.DispatchUrl = "kubernetes://kubetail-cluster-agent:50051"
-	cfg.ClusterAgent.TLS.Enabled = false
 	cfg.ClusterAgent.TLS.CertFile = ""
 	cfg.ClusterAgent.TLS.KeyFile = ""
 	cfg.ClusterAgent.TLS.CAFile = ""
@@ -87,7 +95,6 @@ func DefaultConfig() *Config {
 	cfg.Logging.AccessLog.Enabled = true
 	cfg.Logging.AccessLog.HideHealthChecks = false
 
-	cfg.TLS.Enabled = false
 	cfg.TLS.CertFile = ""
 	cfg.TLS.KeyFile = ""
 
@@ -113,6 +120,12 @@ func NewConfig(configPath string, v *viper.Viper) (*Config, error) {
 		v.SetConfigType(filepath.Ext(configPath)[1:])
 		if err := v.ReadConfig(bytes.NewBuffer(configBytes)); err != nil {
 			return nil, err
+		}
+	}
+
+	for _, k := range removedTLSKeys {
+		if v.IsSet(k) {
+			return nil, fmt.Errorf("config key %q (in %s) is no longer supported and must be removed", k, configPath)
 		}
 	}
 

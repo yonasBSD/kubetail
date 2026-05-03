@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/kubetail-org/kubetail/modules/shared/httphelpers"
 	"github.com/kubetail-org/kubetail/modules/shared/testutils"
 )
 
@@ -82,66 +83,70 @@ func TestServerWebSocketCheckOrigin(t *testing.T) {
 	}
 }
 
-// withSessionCSRFToken stands in for the cluster-api middleware that copies
-// X-Forwarded-CSRF-Token from the upgrade request into the request context.
-func withSessionCSRFToken(h http.Handler, token string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), SessionCSRFTokenCtxKey, token)
-		h.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 func TestServerWebSocketCSRFInit(t *testing.T) {
 	const expected = "expected-csrf-token"
 
 	tests := []struct {
 		name    string
-		ctxTok  string         // "" = bot path, no token in ctx
-		payload map[string]any // connection_init payload
+		headers http.Header
+		payload map[string]any
 		wantAck bool
 	}{
 		{
-			name:    "bot path (no header) accepts empty payload",
+			name:    "header absent, payload missing csrfToken — accepted (no check)",
+			headers: http.Header{},
 			payload: map[string]any{"type": "connection_init"},
 			wantAck: true,
 		},
 		{
-			name:    "bot path (no header) accepts any csrfToken",
+			name:    "header absent, payload csrfToken present — accepted (no check)",
+			headers: http.Header{},
 			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": "anything"}},
 			wantAck: true,
 		},
 		{
-			name:    "browser path with matching csrfToken is accepted",
-			ctxTok:  expected,
+			name:    "header present empty — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{""}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": ""}},
+		},
+		{
+			name:    "header present whitespace only — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{"   "}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": "   "}},
+		},
+		{
+			name:    "header present, payload missing csrfToken — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{expected}},
+			payload: map[string]any{"type": "connection_init"},
+		},
+		{
+			name:    "header present, payload csrfToken empty — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{expected}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": ""}},
+		},
+		{
+			name:    "header present, payload mismatched — rejected",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{expected}},
+			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": "wrong"}},
+		},
+		{
+			name:    "header present, payload matches — accepted",
+			headers: http.Header{httphelpers.HeaderForwardedCSRFToken: []string{expected}},
 			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": expected}},
 			wantAck: true,
-		},
-		{
-			name:    "browser path with wrong csrfToken is rejected",
-			ctxTok:  expected,
-			payload: map[string]any{"type": "connection_init", "payload": map[string]any{"csrfToken": "bad"}},
-		},
-		{
-			name:    "browser path with missing csrfToken is rejected",
-			ctxTok:  expected,
-			payload: map[string]any{"type": "connection_init"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewServer(nil, nil, []string{})
-			var handler http.Handler = s
-			if tt.ctxTok != "" {
-				handler = withSessionCSRFToken(s, tt.ctxTok)
-			}
-
-			client := testutils.NewWebTestClient(t, handler)
+			client := testutils.NewWebTestClient(t, s)
 			defer client.Teardown()
 
 			wsURL := "ws" + strings.TrimPrefix(client.Server.URL, "http") + "/graphql"
 			dialer := websocket.Dialer{Subprotocols: []string{"graphql-transport-ws"}}
-			conn, _, err := dialer.Dial(wsURL, nil)
+
+			conn, _, err := dialer.Dial(wsURL, tt.headers)
 			require.NoError(t, err)
 			defer conn.Close()
 
@@ -155,6 +160,7 @@ func TestServerWebSocketCSRFInit(t *testing.T) {
 				require.Equal(t, "connection_ack", msg["type"])
 				return
 			}
+			// Reject path: server may emit connection_error then close, or close directly — either way no ack.
 			if err == nil {
 				require.NotEqual(t, "connection_ack", msg["type"])
 				conn.SetReadDeadline(time.Now().Add(2 * time.Second))

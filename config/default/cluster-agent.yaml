@@ -55,47 +55,41 @@ logging:
 
 ## tls ##
 #
-# TLS configuration for secure gRPC connections
+# TLS configuration for secure gRPC connections. TLS is mandatory; the listener
+# requires and verifies a client cert chained to `ca-file`.
 #
 tls:
 
-  ## enabled ##
-  #
-  # Whether TLS is enabled for gRPC connections.
-  #
-  # Default value: false
-  #
-  enabled: false
-
   ## cert-file ##
   #
-  # Path to the TLS certificate file.
-  #
-  # Default value: ""
+  # Path to the TLS certificate file. Required.
   #
   cert-file: ""
 
   ## key-file ##
   #
-  # Path to the TLS private key file.
-  #
-  # Default value: ""
+  # Path to the TLS private key file. Required.
   #
   key-file: ""
 
   ## ca-file ##
   #
-  # Path to the CA certificate file for client verification.
-  #
-  # Default value: ""
+  # Path to the CA certificate file used to verify client certs. Required.
   #
   ca-file: ""
 
-  ## client-auth ##
+  ## allowed-names ##
   #
-  # The client authentication policy for TLS connections.
-  # Valid values: none, request, require, verify, require-and-verify
+  # Allowlist of peer-certificate Common Names whose forwarded identity
+  # headers (x-remote-user, x-remote-group, x-remote-extra-*) the agent
+  # will trust. The TLS layer accepts any cert signed by the configured CA;
+  # this list narrows that to the specific clients authorized to assert
+  # identity on behalf of end users (e.g. the cluster-api).
   #
-  # Default value: none
+  # An empty list accepts any verified peer CN, matching kube-apiserver's
+  # `requestheader-allowed-names` semantics. When the CA is shared with
+  # other workloads, populate this list with the cluster-api Service CN.
   #
-  client-auth: none
+  # Default value: []
+  #
+  allowed-names: []

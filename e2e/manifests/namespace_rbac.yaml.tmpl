@@ -1,0 +1,176 @@
+# Test fixtures for test_namespace_rbac.py.
+#
+# Two namespaces, each with a chattering pod and one ServiceAccount whose
+# RBAC grants pod/log access in *that* namespace only. From SA1's view
+# $SA2_NS is forbidden; from SA2's view $SA1_NS is — the
+# differential test in TestClusterApiProxy uses this asymmetry to verify
+# the cluster-agent's identity-keyed SAR cache. Both SAs share one
+# cluster-scoped baseline (nodes + api.kubetail.com/graphql).
+apiVersion: v1
+kind: Namespace
+metadata: {name: $SA1_NS}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: $SA2_NS}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chatter
+  namespace: $SA1_NS
+spec:
+  restartPolicy: Always
+  containers:
+  - name: chatter
+    image: $POD_IMAGE
+    command: ["sh", "-c", "while true; do echo hello-from-ns-1; sleep 1; done"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chatter
+  namespace: $SA2_NS
+spec:
+  restartPolicy: Always
+  containers:
+  - name: chatter
+    image: $POD_IMAGE
+    command: ["sh", "-c", "while true; do echo hello-from-ns-2; sleep 1; done"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $SA1_NAME
+  namespace: $SA1_NS
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $SA2_NAME
+  namespace: $SA2_NS
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: $SA1_NAME-pod-log-reader
+  namespace: $SA1_NS
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: $SA1_NAME-pod-log-reader
+  namespace: $SA1_NS
+subjects:
+- kind: ServiceAccount
+  name: $SA1_NAME
+  namespace: $SA1_NS
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: $SA1_NAME-pod-log-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: $SA2_NAME-pod-log-reader
+  namespace: $SA2_NS
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: $SA2_NAME-pod-log-reader
+  namespace: $SA2_NS
+subjects:
+- kind: ServiceAccount
+  name: $SA2_NAME
+  namespace: $SA2_NS
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: $SA2_NAME-pod-log-reader
+---
+# Group-bound access: pods/log in $GROUP_NS is granted via the Group subject
+# `system:serviceaccounts:$GROUP_NS` — every SA living in $GROUP_NS is auto-
+# included in that group. $GROUP_SA_NAME lives here and has no other RBAC path,
+# so its access proves group identity threads through kube-apiserver ->
+# cluster-api -> cluster-agent and is honored by SAR. SAs in $SA1_NS /
+# $SA2_NS are not members of this group and must be denied.
+apiVersion: v1
+kind: Namespace
+metadata: {name: $GROUP_NS}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $GROUP_SA_NAME
+  namespace: $GROUP_NS
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-log-reader
+  namespace: $GROUP_NS
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-log-reader-via-group
+  namespace: $GROUP_NS
+subjects:
+- kind: Group
+  name: system:serviceaccounts:$GROUP_NS
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pod-log-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: $BASELINE_CLUSTER_ROLE
+rules:
+# Cluster-scoped nodes list/watch: the dashboard's source-watcher needs
+# this to resolve pod node/region/zone metadata.
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["list", "watch"]
+# Cluster-scoped access to the aggregated api.kubetail.com surface so the
+# cluster-api-proxy request can even reach the cluster-api. The actual
+# per-namespace pod-log authorization happens further down (cluster-agent
+# SAR), which is what this test exercises.
+- apiGroups: ["api.kubetail.com"]
+  resources: ["graphql"]
+  verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: $BASELINE_CLUSTER_ROLE
+subjects:
+- kind: ServiceAccount
+  name: $SA1_NAME
+  namespace: $SA1_NS
+- kind: ServiceAccount
+  name: $SA2_NAME
+  namespace: $SA2_NS
+- kind: ServiceAccount
+  name: $GROUP_SA_NAME
+  namespace: $GROUP_NS
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: $BASELINE_CLUSTER_ROLE

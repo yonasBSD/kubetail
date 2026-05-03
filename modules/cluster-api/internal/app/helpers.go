@@ -16,61 +16,54 @@ package app
 
 import (
 	"crypto/tls"
-	"crypto/x509"
+	"net/http"
 	"os"
 
+	"github.com/gin-gonic/gin"
 	zlog "github.com/rs/zerolog/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	grpcdispatcher "github.com/kubetail-org/grpc-dispatcher-go"
 
 	"github.com/kubetail-org/kubetail/modules/shared/grpchelpers"
 
+	"github.com/kubetail-org/kubetail/modules/cluster-api/internal/helpers"
 	"github.com/kubetail-org/kubetail/modules/cluster-api/pkg/config"
 )
 
+func healthzHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
 func mustNewGrpcDispatcher(cfg *config.Config) *grpcdispatcher.Dispatcher {
-	dialOpts := []grpc.DialOption{
-		grpc.WithUnaryInterceptor(grpchelpers.AuthUnaryClientInterceptor),
-		grpc.WithStreamInterceptor(grpchelpers.AuthStreamClientInterceptor),
+	// The cluster-agent strictly requires mTLS, so the cluster-api always
+	// connects with a client cert and verifies the server against the
+	// configured CA. Validation of the file paths happens in config.NewConfig.
+	clientCert, err := tls.LoadX509KeyPair(cfg.ClusterAgent.TLS.CertFile, cfg.ClusterAgent.TLS.KeyFile)
+	if err != nil {
+		zlog.Fatal().Err(err).Send()
 	}
 
-	// configure tls
-	if cfg.ClusterAgent.TLS.Enabled {
-		// Client cert for mTLS
-		clientCert, err := tls.LoadX509KeyPair(cfg.ClusterAgent.TLS.CertFile, cfg.ClusterAgent.TLS.KeyFile)
-		if err != nil {
-			zlog.Fatal().Err(err).Send()
-		}
+	caPem, err := os.ReadFile(cfg.ClusterAgent.TLS.CAFile)
+	if err != nil {
+		zlog.Fatal().Err(err).Send()
+	}
+	roots, err := helpers.PoolFromPEM(string(caPem))
+	if err != nil {
+		zlog.Fatal().Err(err).Send()
+	}
 
-		// Init tls config
-		tlsCfg := &tls.Config{
-			Certificates: []tls.Certificate{clientCert},
-			ServerName:   cfg.ClusterAgent.TLS.ServerName,
-		}
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{clientCert},
+		ServerName:   cfg.ClusterAgent.TLS.ServerName,
+		RootCAs:      roots,
+	}
 
-		if cfg.ClusterAgent.TLS.CAFile != "" {
-			// Root CA for server verification
-			caPem, err := os.ReadFile(cfg.ClusterAgent.TLS.CAFile)
-			if err != nil {
-				zlog.Fatal().Err(err).Send()
-			}
-			roots := x509.NewCertPool()
-			roots.AppendCertsFromPEM(caPem)
-			tlsCfg.RootCAs = roots
-		} else {
-			// Skip verification
-			tlsCfg.InsecureSkipVerify = true
-		}
-
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
-	} else {
-		dialOpts = append(dialOpts,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithAuthority("kubetail-cluster-agent.kubetail-system.svc"),
-		)
+	dialOpts := []grpc.DialOption{
+		grpc.WithUnaryInterceptor(grpchelpers.ImpersonateUnaryClientInterceptor),
+		grpc.WithStreamInterceptor(grpchelpers.ImpersonateStreamClientInterceptor),
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 	}
 
 	// TODO: reuse app clientset

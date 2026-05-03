@@ -25,13 +25,18 @@ done
 DASHBOARD_PORT=$(echo "$DASHBOARD_URL" | grep -oE '[0-9]+$')
 CLUSTER_API_PORT=$(echo "$CLUSTER_API_URL" | grep -oE '[0-9]+$')
 TLS_DIR="$REPO_ROOT/hack/tilt/tls"
-MANIFEST="$SCRIPT_DIR/../manifests/${BACKEND}.yaml"
+MANIFEST="$SCRIPT_DIR/../manifests/${BACKEND}.yaml.tmpl"
 PID_FILE="/tmp/kubetail-e2e-pf.pid"
 
 # Create cluster if it doesn't exist
+K3D_CREATE_ARGS=()
+if [ -n "${K3S_IMAGE:-}" ]; then
+  K3D_CREATE_ARGS+=(--image "$K3S_IMAGE")
+fi
+
 if ! k3d cluster list 2>/dev/null | grep -q "^$CLUSTER_NAME"; then
-  echo "Creating k3d cluster: $CLUSTER_NAME"
-  k3d cluster create "$CLUSTER_NAME"
+  echo "Creating k3d cluster: $CLUSTER_NAME${K3S_IMAGE:+ (image: $K3S_IMAGE)}"
+  k3d cluster create "$CLUSTER_NAME" "${K3D_CREATE_ARGS[@]}"
 else
   echo "Cluster $CLUSTER_NAME already exists, reusing."
 fi
@@ -78,12 +83,12 @@ fi
 
 # Wait for workloads to be ready
 kubectl rollout status deployment/kubetail-dashboard \
-  --namespace=kubetail-system --timeout=120s
+  --namespace=kubetail-system --timeout=90s
 if [ "$BACKEND" = "kubetail-api" ]; then
   kubectl rollout status deployment/kubetail-cluster-api \
-    --namespace=kubetail-system --timeout=120s
+    --namespace=kubetail-system --timeout=90s
   kubectl rollout status daemonset/kubetail-cluster-agent \
-    --namespace=kubetail-system --timeout=120s
+    --namespace=kubetail-system --timeout=90s
 fi
 
 # Kill any existing port-forwards
@@ -105,15 +110,18 @@ if [ "$BACKEND" = "kubetail-api" ]; then
   kubectl port-forward \
     --namespace=kubetail-system \
     service/kubetail-cluster-api \
-    "${CLUSTER_API_PORT}:8080" >/dev/null 2>&1 &
+    "${CLUSTER_API_PORT}:443" >/dev/null 2>&1 &
   echo $! >> "$PID_FILE"
 fi
 
 # Wait for port-forwards to be ready
 wait_for_port() {
   local port=$1
+  local scheme=${2:-http}
+  local curl_opts=(-sf)
+  [ "$scheme" = "https" ] && curl_opts+=(-k)
   for _ in $(seq 1 50); do
-    if curl -sf "http://localhost:${port}/healthz" >/dev/null 2>&1; then
+    if curl "${curl_opts[@]}" "${scheme}://localhost:${port}/healthz" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.2
@@ -124,13 +132,13 @@ wait_for_port() {
 
 wait_for_port "$DASHBOARD_PORT"
 if [ "$BACKEND" = "kubetail-api" ]; then
-  wait_for_port "$CLUSTER_API_PORT"
+  wait_for_port "$CLUSTER_API_PORT" https
 fi
 
 echo ""
 echo "Dashboard: http://localhost:${DASHBOARD_PORT}"
 if [ "$BACKEND" = "kubetail-api" ]; then
-  echo "Cluster API: http://localhost:${CLUSTER_API_PORT}"
+  echo "Cluster API: https://localhost:${CLUSTER_API_PORT}"
 fi
 echo "Backend: $BACKEND"
 echo ""

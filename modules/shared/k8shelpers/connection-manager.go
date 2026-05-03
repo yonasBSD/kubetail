@@ -342,6 +342,10 @@ func (cm *DesktopConnectionManager) kubeConfigModified(newConfig *api.Config) {
 	cm.kubeConfig = newConfig
 }
 
+// inClusterConfigFn is the in-cluster REST config loader. Tests stub it to
+// drive getOrCreateRestConfig_UNSAFE without a real ServiceAccount mount.
+var inClusterConfigFn = rest.InClusterConfig
+
 // Represents InClusterConnectionManager
 type InClusterConnectionManager struct {
 	restConfig    *rest.Config
@@ -505,7 +509,7 @@ func (cm *InClusterConnectionManager) getOrCreateRestConfig_UNSAFE() (*rest.Conf
 	}
 
 	// Create
-	rc, err := rest.InClusterConfig()
+	rc, err := inClusterConfigFn()
 	if err != nil {
 		return nil, err
 	}
@@ -514,9 +518,19 @@ func (cm *InClusterConnectionManager) getOrCreateRestConfig_UNSAFE() (*rest.Conf
 	rc.QPS = 10.0
 	rc.Burst = 40
 
-	// Add authentication middleware
+	// In-cluster, per-request identity reaches kube-apiserver through one of
+	// two channels depending on which caller built the context:
+	//   - cluster-api (fronted by the aggregation layer) writes an
+	//     *ImpersonateInfo into the context; ImpersonatingRoundTripper turns
+	//     it into Impersonate-* headers while the underlying connection
+	//     stays authenticated as the cluster-api ServiceAccount.
+	//   - dashboard `auth-mode: token` writes the caller's bearer token into
+	//     the context; BearerTokenRoundTripper sets Authorization so the
+	//     request executes as that user instead of the dashboard SA.
+	// Both wrappers are no-ops when their respective context key is absent,
+	// so unrelated callers (health checks, SA-only paths) keep working.
 	rc.WrapTransport = func(transport http.RoundTripper) http.RoundTripper {
-		return NewBearerTokenRoundTripper(transport)
+		return NewImpersonatingRoundTripper(NewBearerTokenRoundTripper(transport))
 	}
 
 	// Add to cache

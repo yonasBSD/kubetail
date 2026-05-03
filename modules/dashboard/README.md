@@ -31,7 +31,7 @@ The Kubetail Dashboard server can be configured using a configuration file writt
 | dashboard.addr                                  | string   | Host address to bind to                              | ":8080"      | stable       |
 | dashboard.auth-mode                             | string   | Auth mode (auto, token)                              | "auto"       | experimental |
 | dashboard.base-path                             | string   | URL path prefix                                      | "/"          | stable       |
-| dashboard.cluster-api-endpoint                  | string   | Service url for Cluster API                          | ""           | experimental |
+| dashboard.cluster-api-enabled                   | bool     | Whether the cluster-api is deployed in this cluster  | true         | experimental |
 | dashboard.environment                           | string   | Environment (desktop, cluster)                       | "desktop"    | experimental |
 | dashboard.gin-mode                              | string   | Gin mode (release, debug)                            | "release"    | stable       |
 | dashboard.logging.enabled                       | bool     | Enable logging                                       | true         | stable       |
@@ -47,7 +47,6 @@ The Kubetail Dashboard server can be configured using a configuration file writt
 | dashboard.session.cookie.secure                 | bool     | Session cookie secure property                       | false        | stable       |
 | dashboard.session.cookie.http-only              | bool     | Session cookie HttpOnly property                     | true         | stable       |
 | dashboard.session.cookie.same-site              | string   | Session cookie SameSite property (strict, lax, none) | "strict"     | stable       |
-| dashboard.ui.cluster-api-enabled                | bool     | Enable Cluster API features                          | true         | experimental |
 | dashboard.tls.enabled                           | bool     | Enable tls                                           | false        | stable       |
 | dashboard.tls.cert-file                         | string   | Path to tls certificate file                         | ""           | stable       |
 | dashboard.tls.key-file                          | string   | Path to tls key file                                 | ""           | stable       |  

@@ -16,85 +16,50 @@ package grpchelpers
 
 import (
 	"context"
+	"encoding/json"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
 )
 
-type ctxKey int
+const (
+	userHeader   = "x-remote-user"
+	groupHeader  = "x-remote-group"
+	extrasHeader = "x-remote-extras"
+)
 
-const K8STokenCtxKey ctxKey = iota
-
-// Represents wrap of original stream that returns modified context
-type wrappedStream struct {
-	grpc.ServerStream
-	ctx context.Context
-}
-
-func (s *wrappedStream) Context() context.Context {
-	return s.ctx
-}
-
-// Create new auth server unary interceptor
-func AuthUnaryServerInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-	// Add token to context, if present
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		authorization := md["authorization"]
-		if len(authorization) > 0 {
-			// Add token to context
-			ctx = context.WithValue(ctx, K8STokenCtxKey, authorization[0])
+// withImpersonateMetadata pulls the *ImpersonateInfo off the context (if any)
+// and appends it as outgoing gRPC metadata. Extras ride in a single
+// JSON-encoded header because gRPC metadata keys are restricted to
+// `[0-9a-z-_.]`, which can't carry URL-encoded sub-keys like
+// `authentication.kubernetes.io%2fcredential-id` that kube-apiserver forwards.
+func withImpersonateMetadata(ctx context.Context) context.Context {
+	info, _ := ctx.Value(k8shelpers.K8SImpersonateCtxKey).(*k8shelpers.ImpersonateInfo)
+	if info == nil || info.User == "" {
+		return ctx
+	}
+	kv := []string{userHeader, info.User}
+	for _, g := range info.Groups {
+		kv = append(kv, groupHeader, g)
+	}
+	if len(info.Extras) > 0 {
+		if b, err := json.Marshal(info.Extras); err == nil {
+			kv = append(kv, extrasHeader, string(b))
 		}
 	}
-
-	// Continue
-	return handler(ctx, req)
+	return metadata.AppendToOutgoingContext(ctx, kv...)
 }
 
-// Create new auth client unary interceptor
-func AuthUnaryClientInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-	// Get token context and add to metadata, if present
-	if token, ok := ctx.Value(K8STokenCtxKey).(string); ok {
-		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", token)
-	}
-
-	// Continue
-	return invoker(ctx, method, req, reply, cc, opts...)
+// ImpersonateUnaryClientInterceptor forwards the *ImpersonateInfo on the
+// context to the downstream gRPC server as x-remote-* metadata.
+func ImpersonateUnaryClientInterceptor(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	return invoker(withImpersonateMetadata(ctx), method, req, reply, cc, opts...)
 }
 
-// Create new auth server stream interceptor
-func AuthStreamServerInterceptor(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	ctx := ss.Context()
-
-	// Add token to context, if present
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		authorization := md["authorization"]
-		if len(authorization) > 0 {
-			// Add token to context
-			ctx = context.WithValue(ctx, K8STokenCtxKey, authorization[0])
-		}
-	}
-
-	newStream := &wrappedStream{
-		ServerStream: ss,
-		ctx:          ctx,
-	}
-
-	// Continue
-	return handler(srv, newStream)
-}
-
-// Create new auth client stream interceptor
-func AuthStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-	// Get token from context and add to metadata, if present
-	if token, ok := ctx.Value(K8STokenCtxKey).(string); ok {
-		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", token)
-	}
-
-	// Call the original streamer to proceed with the RPC
-	clientStream, err := streamer(ctx, desc, cc, method, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	return clientStream, nil
+// ImpersonateStreamClientInterceptor is the streaming counterpart of
+// [ImpersonateUnaryClientInterceptor].
+func ImpersonateStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	return streamer(withImpersonateMetadata(ctx), desc, cc, method, opts...)
 }
