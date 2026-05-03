@@ -93,6 +93,67 @@ func TestInClusterProxy_RejectsCrossOriginUpgradeRequest(t *testing.T) {
 	}
 }
 
+func TestInClusterProxy_RejectsPathTraversal(t *testing.T) {
+	tests := []string{
+		"/prefix/ctx/../../api/v1/pods",
+		"/prefix/..",
+		"/prefix/foo/../../bar",
+		// Go's URL parser decodes %2e%2e into ".." in r.URL.Path before the
+		// handler runs, so the segment check still catches it.
+		"/prefix/ctx/%2e%2e/api/v1/pods",
+	}
+
+	for _, p := range tests {
+		t.Run(p, func(t *testing.T) {
+			var captured bool
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captured = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer backend.Close()
+
+			proxy, err := newInClusterProxy(backend.URL, "/prefix", nil, http.DefaultTransport)
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.com"+p, nil)
+			rec := httptest.NewRecorder()
+			proxy.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.False(t, captured, "backend must not be reached on traversal")
+		})
+	}
+}
+
+func TestDesktopProxy_RejectsPathTraversal(t *testing.T) {
+	tests := []string{
+		"/prefix/ctx/../../api/v1/pods",
+		"/prefix/ctx/foo/../../bar",
+		"/prefix/ctx/%2e%2e/api/v1/pods",
+	}
+
+	for _, p := range tests {
+		t.Run(p, func(t *testing.T) {
+			var captured bool
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captured = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			proxy, err := NewDesktopProxy(nil, "/prefix", nil)
+			require.NoError(t, err)
+			proxy.phCache["ctx"] = handler
+
+			req := httptest.NewRequest(http.MethodGet, "http://example.com"+p, nil)
+			rec := httptest.NewRecorder()
+			proxy.ServeHTTP(rec, req)
+
+			assert.Equal(t, http.StatusForbidden, rec.Code)
+			assert.False(t, captured, "backend handler must not be reached on traversal")
+		})
+	}
+}
+
 func TestInClusterProxy_AllowedOriginsAcceptsCrossHostUpgrade(t *testing.T) {
 	var captured bool
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

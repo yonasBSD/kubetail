@@ -90,6 +90,20 @@ func rejectForbiddenUpgrade(w http.ResponseWriter, r *http.Request, allowedOrigi
 	return false
 }
 
+// hasDotDotSegment reports whether p contains a ".." path segment. It must be
+// called before path.Join — once joined, ".." is normalized away and a crafted
+// proxy URL like /cluster-api-proxy/ctx/../../api/v1/pods could escape the
+// APIServicePath prefix and target arbitrary kube-apiserver endpoints with the
+// session bearer token or dashboard ServiceAccount fallback.
+func hasDotDotSegment(p string) bool {
+	for seg := range strings.SplitSeq(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 // stripImpersonationHeaders removes any client-supplied Impersonate-* headers
 // so a caller can't ask kube-apiserver to act as another user/group. The
 // dashboard SA is not granted impersonate RBAC by default, but stripping
@@ -145,6 +159,11 @@ func (p *DesktopProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kubeContext, relPath := matches[1], matches[2]
+
+	if hasDotDotSegment(relPath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 
 	// Get Kubernetes proxy handler. The handler authenticates against
 	// kube-apiserver using whatever credentials the kubeconfig supplies
@@ -288,6 +307,11 @@ func (p *InClusterProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer p.wg.Done()
 
 	if rejectForbiddenUpgrade(w, r, p.allowedOrigins) {
+		return
+	}
+
+	if hasDotDotSegment(r.URL.Path) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
