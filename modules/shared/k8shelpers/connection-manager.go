@@ -342,6 +342,10 @@ func (cm *DesktopConnectionManager) kubeConfigModified(newConfig *api.Config) {
 	cm.kubeConfig = newConfig
 }
 
+// inClusterConfigFn is the in-cluster REST config loader. Tests stub it to
+// drive getOrCreateRestConfig_UNSAFE without a real ServiceAccount mount.
+var inClusterConfigFn = rest.InClusterConfig
+
 // Represents InClusterConnectionManager
 type InClusterConnectionManager struct {
 	restConfig    *rest.Config
@@ -505,7 +509,7 @@ func (cm *InClusterConnectionManager) getOrCreateRestConfig_UNSAFE() (*rest.Conf
 	}
 
 	// Create
-	rc, err := rest.InClusterConfig()
+	rc, err := inClusterConfigFn()
 	if err != nil {
 		return nil, err
 	}

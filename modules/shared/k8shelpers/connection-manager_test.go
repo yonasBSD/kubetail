@@ -17,10 +17,12 @@ package k8shelpers
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -141,6 +143,32 @@ func TestInClusterConnectionManager_NewInformer_AuthorizationFailure(t *testing.
 
 	// Verify that the mock was called as expected
 	mockAuthorizer.AssertExpectations(t)
+}
+
+// Pins the wiring that propagates the originating user's identity to
+// kube-apiserver: the in-cluster REST config must wrap its transport with
+// ImpersonatingRoundTripper. A regression that swaps or drops this wrap
+// would silently downgrade every cluster-api → kube-apiserver call to run
+// as the cluster-api ServiceAccount, bypassing the user's RBAC.
+func TestInClusterConnectionManager_RestConfigWrapsTransportWithImpersonation(t *testing.T) {
+	orig := inClusterConfigFn
+	t.Cleanup(func() { inClusterConfigFn = orig })
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return &rest.Config{Host: "https://example.invalid"}, nil
+	}
+
+	cm, err := NewInClusterConnectionManager()
+	require.NoError(t, err)
+
+	rc, err := cm.GetOrCreateRestConfig("")
+	require.NoError(t, err)
+	require.NotNil(t, rc.WrapTransport, "WrapTransport must be set so per-request Impersonate-* headers reach kube-apiserver")
+
+	inner := http.DefaultTransport
+	wrapped := rc.WrapTransport(inner)
+	impRT, ok := wrapped.(*ImpersonatingRoundTripper)
+	require.Truef(t, ok, "WrapTransport must produce *ImpersonatingRoundTripper; got %T", wrapped)
+	assert.Same(t, inner, impRT.Transport, "ImpersonatingRoundTripper must wrap the underlying transport, not replace it")
 }
 
 func TestInClusterConnectionManager_NewInformer_KubeContextNotSupported(t *testing.T) {
