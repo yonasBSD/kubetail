@@ -196,6 +196,11 @@ func (w *apiServiceHealthMonitorWorker) onInformerUpdate(_, newObj any) {
 }
 
 func (w *apiServiceHealthMonitorWorker) onInformerDelete(obj any) {
+	// Unwrap tombstone delivered when the informer missed the delete event;
+	// otherwise asTarget would reject it and leave w.apiSvc reporting stale health.
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		obj = tombstone.Obj
+	}
 	if asTarget(obj) == nil {
 		return
 	}

@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/cache"
 	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	aggregatorfake "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset/fake"
 )
@@ -125,6 +126,17 @@ func TestAPIServiceWorker_OnInformerDelete_ClearsCache(t *testing.T) {
 
 	w.onInformerAdd(apiSvc)
 	w.onInformerDelete(apiSvc)
+
+	assert.Nil(t, w.apiSvc)
+	assert.Equal(t, HealthStatusNotFound, w.lastStatus)
+}
+
+func TestAPIServiceWorker_OnInformerDelete_UnwrapsTombstone(t *testing.T) {
+	w := newWorker()
+	apiSvc := newAPIService(APIServiceName, "uid-a", availableCond(apiregistrationv1.ConditionTrue))
+
+	w.onInformerAdd(apiSvc)
+	w.onInformerDelete(cache.DeletedFinalStateUnknown{Key: APIServiceName, Obj: apiSvc})
 
 	assert.Nil(t, w.apiSvc)
 	assert.Equal(t, HealthStatusNotFound, w.lastStatus)
