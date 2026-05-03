@@ -83,12 +83,12 @@ fi
 
 # Wait for workloads to be ready
 kubectl rollout status deployment/kubetail-dashboard \
-  --namespace=kubetail-system --timeout=120s
+  --namespace=kubetail-system --timeout=300s
 if [ "$BACKEND" = "kubetail-api" ]; then
   kubectl rollout status deployment/kubetail-cluster-api \
-    --namespace=kubetail-system --timeout=120s
+    --namespace=kubetail-system --timeout=300s
   kubectl rollout status daemonset/kubetail-cluster-agent \
-    --namespace=kubetail-system --timeout=120s
+    --namespace=kubetail-system --timeout=300s
 fi
 
 # Kill any existing port-forwards

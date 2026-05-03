@@ -79,7 +79,7 @@ describe('getDownloadActionURL', () => {
         shouldUseClusterAPI: true,
         kubeContext: 'ctx-1',
       }),
-    ).toBe('/cluster-api-proxy/api/v1/download');
+    ).toBe('/cluster-api-proxy/download');
   });
 
   it('appends kubeContext segment in desktop mode', () => {
@@ -90,7 +90,7 @@ describe('getDownloadActionURL', () => {
         shouldUseClusterAPI: true,
         kubeContext: 'ctx-1',
       }),
-    ).toBe('/cluster-api-proxy/ctx-1/api/v1/download');
+    ).toBe('/cluster-api-proxy/ctx-1/download');
   });
 
   it('honors a non-root basename', () => {
@@ -101,7 +101,7 @@ describe('getDownloadActionURL', () => {
         shouldUseClusterAPI: true,
         kubeContext: 'ctx-1',
       }),
-    ).toBe('/kubetail/cluster-api-proxy/api/v1/download');
+    ).toBe('/kubetail/cluster-api-proxy/download');
   });
 });
 
@@ -465,7 +465,7 @@ describe('DownloadDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Download$/ }));
 
     await waitFor(() => expect(submitSpy).toHaveBeenCalledTimes(1));
-    expect(submittedForm!.action).toMatch(/\/cluster-api-proxy\/.*\/api\/v1\/download$/);
+    expect(submittedForm!.action).toMatch(/\/cluster-api-proxy\/.*\/download$/);
   });
 
   it('raw mode submits TEXT outputFormat and includeMetadata false', async () => {
