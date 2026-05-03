@@ -105,11 +105,17 @@ users:
 """
 
 
+# Kubeconfig written by scripts/up.sh.
+_E2E_KUBECONFIG = "/tmp/kubetail-e2e.kubeconfig"
+
+
 @pytest.fixture(scope="session")
 def serve_url(cli, request):
     port = int(os.environ.get("SERVE_PORT", 9898))
     env = os.environ.copy()
-    if not Path(env.get("KUBECONFIG", Path.home() / ".kube" / "config")).exists():
+    if Path(_E2E_KUBECONFIG).exists():
+        env["KUBECONFIG"] = _E2E_KUBECONFIG
+    elif not Path(env.get("KUBECONFIG", Path.home() / ".kube" / "config")).exists():
         tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".kubeconfig", delete=False
         )
