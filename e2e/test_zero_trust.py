@@ -55,6 +55,41 @@ _AGENT_TARGET_NAME = "kubetail-cluster-agent.kubetail-system.svc"
 _LIST_METHOD = "/cluster_agent.LogMetadataService/List"
 
 
+# k3s stores the front-proxy client cert+key under this path inside the
+# server container. k3d names the server container "k3d-<cluster>-server-0".
+_K3D_SERVER = "k3d-kubetail-e2e-server-0"
+_K3S_FRONT_PROXY_CRT = "/var/lib/rancher/k3s/server/tls/client-auth-proxy.crt"
+_K3S_FRONT_PROXY_KEY = "/var/lib/rancher/k3s/server/tls/client-auth-proxy.key"
+
+
+@pytest.fixture(scope="session")
+def front_proxy_client_cert(tmp_path_factory):
+    """Extract the kube-apiserver's front-proxy client cert+key from the
+    k3d server container. This is the cert kube-apiserver presents when it
+    forwards aggregated requests to cluster-api — anything signed by it
+    (and matching the requestheader-allowed-names CN) is trusted by
+    aggregationAuthMiddleware to *carry* an identity in headers, but the
+    headers themselves still have to be present."""
+    def _docker_cat(path):
+        return subprocess.run(
+            ["docker", "exec", _K3D_SERVER, "cat", path],
+            check=True, capture_output=True,
+        ).stdout
+
+    try:
+        crt_bytes = _docker_cat(_K3S_FRONT_PROXY_CRT)
+        key_bytes = _docker_cat(_K3S_FRONT_PROXY_KEY)
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        pytest.skip(f"front-proxy material unavailable (not a k3d cluster?): {e}")
+
+    d = tmp_path_factory.mktemp("front-proxy-cert")
+    crt = d / "fp.crt"
+    key = d / "fp.key"
+    crt.write_bytes(crt_bytes)
+    key.write_bytes(key_bytes)
+    return (str(crt), str(key))
+
+
 @pytest.fixture(scope="session")
 def admin_client_cert(tmp_path_factory):
     """Extract the e2e admin's client cert+key from the kubeconfig.
@@ -153,6 +188,33 @@ class TestClusterAPIAggregationGate:
             verify=False,
         )
         assert r.status_code == 401, r.text
+
+    def test_front_proxy_cert_without_user_header_rejected(
+        self, cluster_api_url, front_proxy_client_cert,
+    ):
+        """Holding a valid front-proxy cert authorizes you to *forward* an
+        identity — it doesn't make you one. Without an X-Remote-User header
+        the middleware has no user to attach, so the request must be rejected
+        rather than fall through to anonymous-but-trusted."""
+        r = requests.get(
+            f"{cluster_api_url}{_AGGREGATED_BASE}/healthz",
+            cert=front_proxy_client_cert,
+            verify=False,
+        )
+        assert r.status_code == 401, r.text
+
+    def test_front_proxy_cert_with_user_header_authorized(
+        self, cluster_api_url, front_proxy_client_cert,
+    ):
+        """Sanity check that the 401 above isn't cert-rejection in disguise:
+        the same cert with X-Remote-User present passes the gate."""
+        r = requests.get(
+            f"{cluster_api_url}{_AGGREGATED_BASE}/healthz",
+            headers={"X-Remote-User": "front-proxy-sanity"},
+            cert=front_proxy_client_cert,
+            verify=False,
+        )
+        assert r.status_code == 200, r.text
 
     def test_direct_ws_upgrade_rejected(self, cluster_api_url):
         """The aggregation middleware fires on every protected route — including

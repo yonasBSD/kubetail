@@ -36,6 +36,7 @@ from _namespace_rbac import (
     SA1_NS,
     SA2_NS,
     free_port,
+    graphql_field,
     has_authz_denial,
     kubectl,
     session,
@@ -247,6 +248,22 @@ class TestClusterApiProxy:
             bearer=restricted_sa_tokens[token_ns],
         )
         assert has_authz_denial(body) == expect_denial, body
+
+    def test_agent_permission_denied_yields_no_data(
+        self, target_url, restricted_sa_tokens,
+    ):
+        """When the cluster-agent answers PermissionDenied for a fan-out
+        shard, cluster-api must surface that as a GraphQL error and leave
+        the data field null. A regression that returned partial items
+        alongside the error would slip past `has_authz_denial` alone — this
+        test pins the no-leak side of the contract explicitly."""
+        body = _post_graphql(
+            target_url, "/cluster-api-proxy/graphql",
+            _CLUSTER_API_LOG_METADATA, {"namespace": SA2_NS},
+            bearer=restricted_sa_tokens[SA1_NS],
+        )
+        assert has_authz_denial(body), body
+        assert graphql_field(body, "logMetadataList") is None, body
 
     @pytest.mark.parametrize(
         "token_ns,expect_denial",

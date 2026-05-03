@@ -57,6 +57,19 @@ def has_authz_denial(body):
     return any(kw in text for kw in AUTHZ_DENIAL_KEYWORDS)
 
 
+def graphql_field(body, *path):
+    """Walk body['data'] along path, returning the leaf or None at any
+    null. Used to assert that a denied query returned no data — a regression
+    that surfaced PermissionDenied via errors but still leaked records would
+    pass `has_authz_denial` alone."""
+    node = body.get("data")
+    for key in path:
+        if node is None:
+            return None
+        node = node.get(key)
+    return node
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

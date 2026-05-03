@@ -143,6 +143,16 @@ func TestInClusterProxy_ForwardsUserTokenAsAuthorization(t *testing.T) {
 			clientHdr: "Bearer attacker",
 			wantAuth:  "",
 		},
+		{
+			// Defense-in-depth: a malicious client header must never tunnel
+			// past the user's session identity. The Director deletes
+			// Authorization before re-setting from ctx, so the attacker's
+			// token can't end up forwarded — but only this test pins it.
+			name:      "client-supplied Authorization replaced by session token",
+			userToken: "user-token-123",
+			clientHdr: "Bearer attacker",
+			wantAuth:  "Bearer user-token-123",
+		},
 	}
 
 	for _, tt := range tests {

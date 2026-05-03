@@ -212,6 +212,83 @@ func TestAggregationAuth_FrontProxyMissingUsernameHeader(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
+// kube-apiserver emits one X-Remote-Group header per group via http.Header.Add,
+// so reading the header with Get/GetHeader silently drops every group after
+// the first — and any RBAC binding subject not on that first group quietly
+// stops applying. This test pins the multi-value extraction across edge cases
+// (single value, many values, duplicates, no values, alternate header name).
+func TestAggregationAuth_ExtractsAllGroups(t *testing.T) {
+	proxyCA := newTestCA(t, "proxy-ca")
+	proxyLeaf := proxyCA.issue(t, "front-proxy-client")
+
+	tests := []struct {
+		name         string
+		groupHeaders []string // cfg.GroupHeaders override
+		setHeaders   map[string][]string
+		want         []string
+	}{
+		{
+			name:       "single group",
+			setHeaders: map[string][]string{"X-Remote-Group": {"devs"}},
+			want:       []string{"devs"},
+		},
+		{
+			name: "many groups all retained in order",
+			setHeaders: map[string][]string{"X-Remote-Group": {
+				"system:authenticated", "system:masters", "devs", "sre", "oncall",
+			}},
+			want: []string{"system:authenticated", "system:masters", "devs", "sre", "oncall"},
+		},
+		{
+			name:       "duplicate values preserved",
+			setHeaders: map[string][]string{"X-Remote-Group": {"devs", "devs", "sre"}},
+			want:       []string{"devs", "devs", "sre"},
+		},
+		{
+			name:       "no group header yields nil",
+			setHeaders: nil,
+			want:       nil,
+		},
+		{
+			// Configured to look at X-Custom-Groups first; the ordering rule is
+			// "first header name with any values wins" — pin it here so a
+			// well-meaning refactor doesn't switch to "merge across all names"
+			// (which would let an attacker append groups via an unexpected
+			// header that happened to slip past upstream filtering).
+			name:         "alternate group header honored",
+			groupHeaders: []string{"X-Custom-Groups", "X-Remote-Group"},
+			setHeaders: map[string][]string{
+				"X-Remote-Group":  {"devs"},
+				"X-Custom-Groups": {"sre", "oncall"},
+			},
+			want: []string{"sre", "oncall"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := newTestAuthCfg(proxyCA, "front-proxy-client")
+			if tt.groupHeaders != nil {
+				cfg.GroupHeaders = tt.groupHeaders
+			}
+			mw := newAggregationAuthMiddleware(cfg)
+
+			r := requestWithCert([]*x509.Certificate{proxyLeaf}, nil)
+			r.Header.Set("X-Remote-User", "alice")
+			for k, vs := range tt.setHeaders {
+				for _, v := range vs {
+					r.Header.Add(k, v)
+				}
+			}
+
+			w, impersonate := runMiddleware(mw, r)
+			require.Equal(t, http.StatusOK, w.Result().StatusCode)
+			require.NotNil(t, impersonate)
+			assert.Equal(t, tt.want, impersonate.Groups)
+		})
+	}
+}
+
 // caPEM returns the PEM encoding of ca.cert. Used to populate the ConfigMap
 // data in loadAggregationAuthConfig tests.
 func (ca *testCA) pem(t *testing.T) string {
