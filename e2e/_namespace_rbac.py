@@ -84,3 +84,19 @@ def session(base_url):
     tok = r.headers.get("X-CSRF-Token", "")
     assert tok, "X-CSRF-Token missing from session response"
     return s, tok
+
+
+def post_graphql(base_url, path, query, variables, *, bearer=None):
+    """POST a GraphQL operation through the dashboard's CSRF gate."""
+    s, csrf = session(base_url)
+    headers = {"Sec-Fetch-Site": "same-origin", "X-CSRF-Token": csrf}
+    if bearer is not None:
+        headers["Authorization"] = f"Bearer {bearer}"
+    r = s.post(
+        f"{base_url}{path}",
+        headers=headers,
+        json={"query": query, "variables": variables},
+        timeout=20,
+    )
+    assert r.status_code == 200, r.text
+    return r.json()

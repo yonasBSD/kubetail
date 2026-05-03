@@ -39,7 +39,7 @@ from _namespace_rbac import (
     graphql_field,
     has_authz_denial,
     kubectl,
-    session,
+    post_graphql,
 )
 
 # Both env tracks need the kubetail-api backend (cluster mode needs it for
@@ -63,21 +63,6 @@ _CLUSTER_API_LOG_METADATA = (
 # requires /cluster-api-proxy/<kubeContext>/<relPath>; in cluster mode the
 # InClusterProxy ignores the path tail.
 _E2E_KUBE_CONTEXT = "k3d-kubetail-e2e"
-
-
-def _post_graphql(base_url, path, query, variables, *, bearer=None):
-    s, csrf = session(base_url)
-    headers = {"Sec-Fetch-Site": "same-origin", "X-CSRF-Token": csrf}
-    if bearer is not None:
-        headers["Authorization"] = f"Bearer {bearer}"
-    r = s.post(
-        f"{base_url}{path}",
-        headers=headers,
-        json={"query": query, "variables": variables},
-        timeout=20,
-    )
-    assert r.status_code == 200, r.text
-    return r.json()
 
 
 _NAMESPACE_CASES = pytest.mark.parametrize(
@@ -169,7 +154,7 @@ class TestCliDashboard:
 
     @_NAMESPACE_CASES
     def test_log_records_fetch(self, restricted_serve_url, namespace, expect_denial):
-        body = _post_graphql(
+        body = post_graphql(
             restricted_serve_url, "/graphql",
             _DASHBOARD_LOG_FETCH, {"sources": [f"{namespace}:pods/chatter"]},
         )
@@ -183,7 +168,7 @@ class TestCliApiProxy:
 
     @_NAMESPACE_CASES
     def test_log_metadata_list(self, restricted_serve_url, namespace, expect_denial):
-        body = _post_graphql(
+        body = post_graphql(
             restricted_serve_url,
             f"/cluster-api-proxy/{_E2E_KUBE_CONTEXT}/graphql",
             _CLUSTER_API_LOG_METADATA, {"namespace": namespace},
@@ -203,7 +188,7 @@ class TestClusterDashboard:
     def test_log_records_fetch(
         self, target_url, restricted_sa_tokens, namespace, expect_denial
     ):
-        body = _post_graphql(
+        body = post_graphql(
             target_url, "/graphql",
             _DASHBOARD_LOG_FETCH, {"sources": [f"{namespace}:pods/chatter"]},
             bearer=restricted_sa_tokens[SA1_NS],
@@ -220,7 +205,7 @@ class TestClusterApiProxy:
     def test_log_metadata_list(
         self, target_url, restricted_sa_tokens, namespace, expect_denial
     ):
-        body = _post_graphql(
+        body = post_graphql(
             target_url, "/cluster-api-proxy/graphql",
             _CLUSTER_API_LOG_METADATA, {"namespace": namespace},
             bearer=restricted_sa_tokens[SA1_NS],
@@ -231,7 +216,7 @@ class TestClusterApiProxy:
     def test_log_records_fetch(
         self, target_url, restricted_sa_tokens, namespace, expect_denial
     ):
-        body = _post_graphql(
+        body = post_graphql(
             target_url, "/cluster-api-proxy/graphql",
             _DASHBOARD_LOG_FETCH, {"sources": [f"{namespace}:pods/chatter"]},
             bearer=restricted_sa_tokens[SA1_NS],
@@ -259,7 +244,7 @@ class TestClusterApiProxy:
         two identities — exercises identity flow through kube-apiserver
         aggregation -> cluster-api -> cluster-agent and the cluster-agent's
         identity-keyed SAR cache."""
-        body = _post_graphql(
+        body = post_graphql(
             target_url, "/cluster-api-proxy/graphql",
             _CLUSTER_API_LOG_METADATA, {"namespace": query_ns},
             bearer=restricted_sa_tokens[token_ns],
@@ -274,7 +259,7 @@ class TestClusterApiProxy:
         the data field null. A regression that returned partial items
         alongside the error would slip past `has_authz_denial` alone — this
         test pins the no-leak side of the contract explicitly."""
-        body = _post_graphql(
+        body = post_graphql(
             target_url, "/cluster-api-proxy/graphql",
             _CLUSTER_API_LOG_METADATA, {"namespace": SA2_NS},
             bearer=restricted_sa_tokens[SA1_NS],
@@ -296,7 +281,7 @@ class TestClusterApiProxy:
         Proves group identity threads through kube-apiserver -> cluster-api
         front-proxy headers -> cluster-agent SAR and is honored, not silently
         dropped."""
-        body = _post_graphql(
+        body = post_graphql(
             target_url, "/cluster-api-proxy/graphql",
             _CLUSTER_API_LOG_METADATA, {"namespace": GROUP_NS},
             bearer=restricted_sa_tokens[token_ns],
