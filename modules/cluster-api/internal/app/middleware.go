@@ -46,7 +46,6 @@ func setImpersonateOnRequest(c *gin.Context, info *k8shelpers.ImpersonateInfo) {
 // AllowedNames is the `requestheader-allowed-names` allowlist; an empty list
 // means any front-proxy CN is accepted (matches kube-apiserver behavior).
 type aggregationAuthConfig struct {
-	ClientCAs            *x509.CertPool
 	ProxyCAs             *x509.CertPool
 	AllowedNames         []string
 	UsernameHeaders      []string
@@ -54,10 +53,11 @@ type aggregationAuthConfig struct {
 	ExtraHeadersPrefixes []string
 }
 
-// newAggregationAuthMiddleware authenticates the caller via direct mTLS
-// (client CA, cert CN becomes the user) or via the kube-apiserver
-// front-proxy (proxy CA + request headers). The authenticated identity
-// lands on the request context as *k8shelpers.ImpersonateInfo.
+// newAggregationAuthMiddleware authenticates the caller as the kube-apiserver
+// front-proxy (proxy CA + request headers). Direct mTLS from any other holder
+// of a cluster cert is rejected — the cluster-api accepts requests only via
+// the kube-apiserver chain. The authenticated identity lands on the request
+// context as *k8shelpers.ImpersonateInfo.
 func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		r := c.Request
@@ -71,19 +71,6 @@ func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 		}
 
 		now := time.Now()
-		leaf := r.TLS.PeerCertificates[0]
-
-		if cfg.ClientCAs != nil {
-			if _, err := leaf.Verify(x509.VerifyOptions{
-				Roots:       cfg.ClientCAs,
-				CurrentTime: now,
-				KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-			}); err == nil {
-				setImpersonateOnRequest(c, &k8shelpers.ImpersonateInfo{User: leaf.Subject.CommonName})
-				c.Next()
-				return
-			}
-		}
 
 		var proxyCert *x509.Certificate
 		if cfg.ProxyCAs != nil {
@@ -179,16 +166,12 @@ func loadAggregationAuthConfig(ctx context.Context, cs kubernetes.Interface) (*a
 		return nil, fmt.Errorf("read extension-apiserver-authentication: %w", err)
 	}
 
-	clientCAs, err := helpers.PoolFromPEM(cm.Data["client-ca-file"])
-	if err != nil {
-		return nil, fmt.Errorf("client-ca-file in extension-apiserver-authentication: %w", err)
-	}
 	proxyCAs, err := helpers.PoolFromPEM(cm.Data["requestheader-client-ca-file"])
 	if err != nil {
 		return nil, fmt.Errorf("requestheader-client-ca-file in extension-apiserver-authentication: %w", err)
 	}
 
-	out := &aggregationAuthConfig{ClientCAs: clientCAs, ProxyCAs: proxyCAs}
+	out := &aggregationAuthConfig{ProxyCAs: proxyCAs}
 	for _, f := range []struct {
 		key string
 		dst *[]string

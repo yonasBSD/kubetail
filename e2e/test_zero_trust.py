@@ -1,6 +1,8 @@
 """Zero-trust ingress tests: cluster-api only honors aggregated requests
 through kube-apiserver; cluster-agent only honors mTLS clients."""
 
+import asyncio
+import base64
 import json
 import socket
 import ssl
@@ -11,6 +13,8 @@ from pathlib import Path
 
 import pytest
 import requests
+import websockets
+import websockets.exceptions
 
 pytestmark = [pytest.mark.cluster, pytest.mark.kubetail_api]
 
@@ -25,6 +29,28 @@ _UNTRUSTED_CLIENT_CERT = (
     str(Path(__file__).parent / "tls" / "untrusted-client.crt"),
     str(Path(__file__).parent / "tls" / "untrusted-client.key"),
 )
+
+
+@pytest.fixture(scope="session")
+def admin_client_cert(tmp_path_factory):
+    """Extract the e2e admin's client cert+key from the kubeconfig.
+
+    The k3d admin cert is signed by the same CA the cluster-api loads
+    into its ClientCAs pool (extension-apiserver-authentication's
+    client-ca-file), so a request bearing it takes the middleware's
+    direct-cert path."""
+    cfg = json.loads(subprocess.run(
+        ["kubectl", f"--kubeconfig={_KUBECONFIG}", "config", "view",
+         "--raw", "--minify", "--flatten", "-o", "json"],
+        check=True, capture_output=True, text=True,
+    ).stdout)
+    user = cfg["users"][0]["user"]
+    d = tmp_path_factory.mktemp("admin-cert")
+    crt = d / "client.crt"
+    key = d / "client.key"
+    crt.write_bytes(base64.b64decode(user["client-certificate-data"]))
+    key.write_bytes(base64.b64decode(user["client-key-data"]))
+    return (str(crt), str(key))
 
 
 class TestClusterAPIAggregationGate:
@@ -66,11 +92,10 @@ class TestClusterAPIAggregationGate:
         assert r.status_code == 401
 
     def test_untrusted_client_cert_with_spoofed_headers_rejected(self, cluster_api_url):
-        """Same spoofed headers but with a TLS client cert that chains to
-        neither the client-CA nor requestheader-client-CA pool. Exercises
-        the middleware's `no valid certificate found` branch — proves the
-        listener actually presents both CA pools and that *having* a cert
-        isn't sufficient to reach the header-parsing path."""
+        """Same spoofed headers but with an arbitrary self-signed cert that
+        doesn't chain to the front-proxy CA pool. Exercises the middleware's
+        `no valid certificate found` branch — proves *having* a cert isn't
+        sufficient to reach the header-parsing path."""
         r = requests.post(
             f"{cluster_api_url}{_AGGREGATED_BASE}/graphql",
             json={"query": "{__typename}"},
@@ -82,6 +107,54 @@ class TestClusterAPIAggregationGate:
             verify=False,
         )
         assert r.status_code == 401
+
+    def test_legitimate_cluster_cert_not_front_proxy_rejected(
+        self, cluster_api_url, admin_client_cert,
+    ):
+        """A holder of a legitimate cluster cert (kubectl admin, controller,
+        system:node, etc.) is NOT kube-apiserver — they must be rejected at
+        the gate. The cluster-api accepts requests only via the front-proxy
+        chain. Spoofed headers in particular are never read because the cert
+        itself fails verification against the requestheader-client-ca-file
+        pool (the only trust anchor we honor)."""
+        r = requests.post(
+            f"{cluster_api_url}{_AGGREGATED_BASE}/graphql",
+            json={"query": '{ logMetadataList(namespace: "kubetail-system") { items { id } } }'},
+            headers={
+                "X-Remote-User": "spoofed-attacker",
+                "X-Remote-Group": "system:masters",
+                "X-Remote-Extra-Scopes": "openid",
+            },
+            cert=admin_client_cert,
+            verify=False,
+        )
+        assert r.status_code == 401, r.text
+
+    def test_direct_ws_upgrade_rejected(self, cluster_api_url):
+        """The aggregation middleware fires on every protected route — including
+        WebSocket upgrades. A direct upgrade attempt without a client cert must
+        get the same 401 the HTTP path returns; otherwise a WS-only auth bypass
+        would let an attacker stream subscriptions without identity."""
+        ws_url = (
+            cluster_api_url.replace("https://", "wss://")
+            + f"{_AGGREGATED_BASE}/graphql"
+        )
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        async def upgrade():
+            async with websockets.connect(
+                ws_url,
+                ssl=ctx,
+                subprotocols=["graphql-transport-ws"],
+                open_timeout=5,
+            ):
+                pass
+
+        with pytest.raises(websockets.exceptions.InvalidStatus) as exc:
+            asyncio.run(upgrade())
+        assert exc.value.response.status_code == 401
 
     @pytest.mark.usefixtures("cluster_api_url")
     def test_through_kube_apiserver_authorized(self):

@@ -122,9 +122,8 @@ func runMiddleware(mw gin.HandlerFunc, r *http.Request) (*httptest.ResponseRecor
 	return w, impersonate
 }
 
-func newTestAuthCfg(clientCA, proxyCA *testCA, allowedNames ...string) *aggregationAuthConfig {
+func newTestAuthCfg(proxyCA *testCA, allowedNames ...string) *aggregationAuthConfig {
 	return &aggregationAuthConfig{
-		ClientCAs:            clientCA.pool,
 		ProxyCAs:             proxyCA.pool,
 		AllowedNames:         allowedNames,
 		UsernameHeaders:      []string{"X-Remote-User"},
@@ -134,31 +133,38 @@ func newTestAuthCfg(clientCA, proxyCA *testCA, allowedNames ...string) *aggregat
 }
 
 func TestAggregationAuth_RejectsRequestWithoutPeerCert(t *testing.T) {
-	mw := newAggregationAuthMiddleware(newTestAuthCfg(newTestCA(t, "client-ca"), newTestCA(t, "proxy-ca")))
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(newTestCA(t, "proxy-ca")))
 	w, _ := runMiddleware(mw, requestWithCert(nil, nil))
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
-func TestAggregationAuth_DirectClientCert(t *testing.T) {
-	clientCA := newTestCA(t, "client-ca")
+// Threat model: any client whose cert is in the cluster's client-ca-file
+// pool (kubectl admin, controller certs, system:node, …) holds a valid
+// cluster cert but is NOT kube-apiserver. They must be rejected — the
+// cluster-api accepts requests only from the front-proxy chain. Without
+// this guarantee, any cluster user could call cluster-api directly with
+// X-Remote-User headers and impersonate an arbitrary identity.
+func TestAggregationAuth_RejectsNonFrontProxyCert(t *testing.T) {
+	otherCA := newTestCA(t, "client-ca") // simulates a cluster client-CA
 	proxyCA := newTestCA(t, "proxy-ca")
-	leaf := clientCA.issue(t, "alice")
+	leaf := otherCA.issue(t, "alice") // legitimate cluster client cert
 
-	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA))
-	w, impersonate := runMiddleware(mw, requestWithCert([]*x509.Certificate{leaf}, nil))
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(proxyCA))
+	r := requestWithCert([]*x509.Certificate{leaf}, nil)
+	r.Header.Set("X-Remote-User", "system:masters")
+	r.Header.Add("X-Remote-Group", "system:masters")
+	r.Header.Set("X-Remote-Extra-Scopes", "openid")
+	w, impersonate := runMiddleware(mw, r)
 
-	require.Equal(t, http.StatusOK, w.Result().StatusCode)
-	require.NotNil(t, impersonate)
-	assert.Equal(t, "alice", impersonate.User)
-	assert.Empty(t, impersonate.Groups)
+	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
+	assert.Nil(t, impersonate, "non-front-proxy cert must not produce an identity, even with spoofed headers")
 }
 
 func TestAggregationAuth_FrontProxyHeadersExtractIdentity(t *testing.T) {
-	clientCA := newTestCA(t, "client-ca")
 	proxyCA := newTestCA(t, "proxy-ca")
 	proxyLeaf := proxyCA.issue(t, "front-proxy-client")
 
-	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(proxyCA, "front-proxy-client"))
 	r := requestWithCert([]*x509.Certificate{proxyLeaf}, nil)
 	r.Header.Set("X-Remote-User", "bob")
 	// kube-apiserver emits one X-Remote-Group header per group (Add, not Set).
@@ -175,23 +181,21 @@ func TestAggregationAuth_FrontProxyHeadersExtractIdentity(t *testing.T) {
 }
 
 func TestAggregationAuth_FrontProxyCNNotAllowed(t *testing.T) {
-	clientCA := newTestCA(t, "client-ca")
 	proxyCA := newTestCA(t, "proxy-ca")
 	proxyLeaf := proxyCA.issue(t, "stranger")
 
-	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(proxyCA, "front-proxy-client"))
 	r := requestWithCert([]*x509.Certificate{proxyLeaf}, map[string]string{"X-Remote-User": "bob"})
 	w, _ := runMiddleware(mw, r)
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
 
 func TestAggregationAuth_RejectsCertFromUntrustedCA(t *testing.T) {
-	clientCA := newTestCA(t, "client-ca")
 	proxyCA := newTestCA(t, "proxy-ca")
 	untrustedCA := newTestCA(t, "untrusted-ca")
 	leaf := untrustedCA.issue(t, "alice")
 
-	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(proxyCA, "front-proxy-client"))
 	r := requestWithCert([]*x509.Certificate{leaf}, map[string]string{"X-Remote-User": "alice"})
 	w, impersonate := runMiddleware(mw, r)
 
@@ -200,11 +204,10 @@ func TestAggregationAuth_RejectsCertFromUntrustedCA(t *testing.T) {
 }
 
 func TestAggregationAuth_FrontProxyMissingUsernameHeader(t *testing.T) {
-	clientCA := newTestCA(t, "client-ca")
 	proxyCA := newTestCA(t, "proxy-ca")
 	proxyLeaf := proxyCA.issue(t, "front-proxy-client")
 
-	mw := newAggregationAuthMiddleware(newTestAuthCfg(clientCA, proxyCA, "front-proxy-client"))
+	mw := newAggregationAuthMiddleware(newTestAuthCfg(proxyCA, "front-proxy-client"))
 	w, _ := runMiddleware(mw, requestWithCert([]*x509.Certificate{proxyLeaf}, nil))
 	assert.Equal(t, http.StatusUnauthorized, w.Result().StatusCode)
 }
@@ -217,7 +220,6 @@ func (ca *testCA) pem(t *testing.T) string {
 }
 
 func TestLoadAggregationAuthConfig(t *testing.T) {
-	clientCA := newTestCA(t, "client-ca")
 	proxyCA := newTestCA(t, "proxy-ca")
 
 	cs := fake.NewClientset(&corev1.ConfigMap{
@@ -226,7 +228,6 @@ func TestLoadAggregationAuthConfig(t *testing.T) {
 			Namespace: "kube-system",
 		},
 		Data: map[string]string{
-			"client-ca-file":                     clientCA.pem(t),
 			"requestheader-client-ca-file":       proxyCA.pem(t),
 			"requestheader-allowed-names":        `["front-proxy-client"]`,
 			"requestheader-username-headers":     `["X-Remote-User"]`,
@@ -238,16 +239,15 @@ func TestLoadAggregationAuthConfig(t *testing.T) {
 	got, err := loadAggregationAuthConfig(context.Background(), cs)
 	require.NoError(t, err)
 
-	require.NotNil(t, got.ClientCAs)
 	require.NotNil(t, got.ProxyCAs)
 	assert.Equal(t, []string{"front-proxy-client"}, got.AllowedNames)
 	assert.Equal(t, []string{"X-Remote-User"}, got.UsernameHeaders)
 	assert.Equal(t, []string{"X-Remote-Group"}, got.GroupHeaders)
 	assert.Equal(t, []string{"X-Remote-Extra-"}, got.ExtraHeadersPrefixes)
 
-	// Sanity: a leaf signed by clientCA verifies against the loaded pool.
-	leaf := clientCA.issue(t, "alice")
-	_, verr := leaf.Verify(x509.VerifyOptions{Roots: got.ClientCAs, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
+	// Sanity: a leaf signed by proxyCA verifies against the loaded pool.
+	leaf := proxyCA.issue(t, "front-proxy-client")
+	_, verr := leaf.Verify(x509.VerifyOptions{Roots: got.ProxyCAs, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
 	require.NoError(t, verr)
 }
 
@@ -258,13 +258,11 @@ func TestLoadAggregationAuthConfigMissingConfigMap(t *testing.T) {
 }
 
 func TestLoadAggregationAuthConfigBadJSON(t *testing.T) {
-	clientCA := newTestCA(t, "client-ca")
 	proxyCA := newTestCA(t, "proxy-ca")
 
 	cs := fake.NewClientset(&corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "extension-apiserver-authentication", Namespace: "kube-system"},
 		Data: map[string]string{
-			"client-ca-file":                     clientCA.pem(t),
 			"requestheader-client-ca-file":       proxyCA.pem(t),
 			"requestheader-allowed-names":        `not json`,
 			"requestheader-username-headers":     `["X-Remote-User"]`,
