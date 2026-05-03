@@ -518,12 +518,19 @@ func (cm *InClusterConnectionManager) getOrCreateRestConfig_UNSAFE() (*rest.Conf
 	rc.QPS = 10.0
 	rc.Burst = 40
 
-	// In-cluster the connection authenticates as the cluster-api's own
-	// ServiceAccount; per-request identity is propagated via Impersonate-*
-	// headers (set when the aggregation auth middleware writes
-	// *ImpersonateInfo into the request context).
+	// In-cluster, per-request identity reaches kube-apiserver through one of
+	// two channels depending on which caller built the context:
+	//   - cluster-api (fronted by the aggregation layer) writes an
+	//     *ImpersonateInfo into the context; ImpersonatingRoundTripper turns
+	//     it into Impersonate-* headers while the underlying connection
+	//     stays authenticated as the cluster-api ServiceAccount.
+	//   - dashboard `auth-mode: token` writes the caller's bearer token into
+	//     the context; BearerTokenRoundTripper sets Authorization so the
+	//     request executes as that user instead of the dashboard SA.
+	// Both wrappers are no-ops when their respective context key is absent,
+	// so unrelated callers (health checks, SA-only paths) keep working.
 	rc.WrapTransport = func(transport http.RoundTripper) http.RoundTripper {
-		return NewImpersonatingRoundTripper(transport)
+		return NewImpersonatingRoundTripper(NewBearerTokenRoundTripper(transport))
 	}
 
 	// Add to cache
