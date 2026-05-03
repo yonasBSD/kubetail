@@ -201,7 +201,29 @@ func TestAggregationAuth_FrontProxyHeadersExtractIdentity(t *testing.T) {
 	require.NotNil(t, impersonate)
 	assert.Equal(t, "bob", impersonate.User)
 	assert.Equal(t, []string{"devs", "sre"}, impersonate.Groups)
-	assert.Equal(t, []string{"openid"}, impersonate.Extras["Scopes"])
+	assert.Equal(t, []string{"openid"}, impersonate.Extras["scopes"])
+}
+
+// kube-apiserver treats requestheader-extra-headers-prefix case-insensitively
+// and is often configured with lowercase prefixes. Net/http canonicalizes the
+// header map keys, so a sensitive prefix match would silently drop every
+// forwarded extra attribute and quietly break any policy that consumes them.
+func TestAggregationAuth_ExtraPrefixCaseInsensitive(t *testing.T) {
+	proxyCA := newTestCA(t, "proxy-ca")
+	proxyLeaf := proxyCA.issue(t, "front-proxy-client")
+
+	cfg := newTestAuthCfg(proxyCA, "front-proxy-client")
+	cfg.ExtraHeadersPrefixes = []string{"x-remote-extra-"}
+
+	mw := newAggregationAuthMiddleware(cfg)
+	r := requestWithCert([]*x509.Certificate{proxyLeaf}, nil)
+	r.Header.Set("X-Remote-User", "bob")
+	r.Header.Set("X-Remote-Extra-Scopes", "openid")
+	w, impersonate := runMiddleware(mw, r)
+
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+	require.NotNil(t, impersonate)
+	assert.Equal(t, []string{"openid"}, impersonate.Extras["scopes"])
 }
 
 func TestAggregationAuth_FrontProxyCNNotAllowed(t *testing.T) {

@@ -134,11 +134,16 @@ func newAggregationAuthMiddleware(cfg *aggregationAuthConfig) gin.HandlerFunc {
 			}
 		}
 
+		// Request-header extra prefixes are case-insensitive (kube-apiserver
+		// behavior); incoming header map keys are canonicalized by net/http,
+		// so a lowercase configured prefix (e.g. "x-remote-extra-") would
+		// never match a sensitive CutPrefix against "X-Remote-Extra-Foo".
 		var extras map[string][]string
 		if len(cfg.ExtraHeadersPrefixes) > 0 {
 			for name, vals := range r.Header {
+				lname := strings.ToLower(name)
 				for _, prefix := range cfg.ExtraHeadersPrefixes {
-					if after, ok := strings.CutPrefix(name, prefix); ok {
+					if after, ok := strings.CutPrefix(lname, strings.ToLower(prefix)); ok {
 						if extras == nil {
 							extras = map[string][]string{}
 						}
