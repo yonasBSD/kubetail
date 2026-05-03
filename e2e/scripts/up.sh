@@ -25,7 +25,7 @@ done
 DASHBOARD_PORT=$(echo "$DASHBOARD_URL" | grep -oE '[0-9]+$')
 CLUSTER_API_PORT=$(echo "$CLUSTER_API_URL" | grep -oE '[0-9]+$')
 TLS_DIR="$REPO_ROOT/hack/tilt/tls"
-MANIFEST="$SCRIPT_DIR/../manifests/${BACKEND}.yaml"
+MANIFEST="$SCRIPT_DIR/../manifests/${BACKEND}.yaml.tmpl"
 PID_FILE="/tmp/kubetail-e2e-pf.pid"
 
 # Create cluster if it doesn't exist

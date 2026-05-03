@@ -146,6 +146,45 @@ def assert_healthz(url):
     assert resp.json() == {"status": "ok"}
 
 
+@pytest.fixture(scope="session")
+def restricted_sa_token(_backend):
+    """Apply the namespace-scoped RBAC manifest and yield an SA bearer token.
+
+    Shared by the cli and cluster namespace-rbac tests so the cluster only
+    pays the manifest-apply cost once per backend.
+    """
+    from _namespace_rbac import (
+        ALLOWED_NS,
+        FORBIDDEN_NS,
+        SA_NAME,
+        kubectl,
+        rendered_manifest,
+    )
+
+    if not Path(_E2E_KUBECONFIG).exists():
+        pytest.skip(f"e2e kubeconfig {_E2E_KUBECONFIG} not found")
+
+    kubectl("apply", "-f", "-", input=rendered_manifest())
+    try:
+        token = kubectl(
+            "create", "token", SA_NAME, "-n", ALLOWED_NS, "--duration", "1h"
+        ).stdout.strip()
+        assert token, "empty token from `kubectl create token`"
+        yield token
+    finally:
+        # Best-effort cleanup; don't fail teardown if the cluster is gone.
+        kubectl("delete", "namespace", ALLOWED_NS, "--wait=false", check=False)
+        kubectl("delete", "namespace", FORBIDDEN_NS, "--wait=false", check=False)
+        kubectl(
+            "delete", "clusterrolebinding", f"{SA_NAME}-baseline",
+            "--ignore-not-found", check=False,
+        )
+        kubectl(
+            "delete", "clusterrole", f"{SA_NAME}-baseline",
+            "--ignore-not-found", check=False,
+        )
+
+
 def pytest_collection_modifyitems(config, items):
     selected, deselected = [], []
     for item in items:

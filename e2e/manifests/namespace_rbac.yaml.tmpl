@@ -1,0 +1,99 @@
+# Test fixtures for test_namespace_rbac.py.
+#
+# Two namespaces with a chattering pod each, plus a ServiceAccount whose
+# RBAC grants pod/log access in $ALLOWED_NS only. Cluster-scoped
+# nodes list/watch is granted because the dashboard's source-watcher
+# needs it to resolve pod node/region/zone metadata; the actual claim
+# under test is the namespace-scoped pod-log restriction.
+apiVersion: v1
+kind: Namespace
+metadata: {name: $ALLOWED_NS}
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: $FORBIDDEN_NS}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chatter
+  namespace: $ALLOWED_NS
+spec:
+  restartPolicy: Always
+  containers:
+  - name: chatter
+    image: $POD_IMAGE
+    command: ["sh", "-c", "while true; do echo hello-allowed; sleep 1; done"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chatter
+  namespace: $FORBIDDEN_NS
+spec:
+  restartPolicy: Always
+  containers:
+  - name: chatter
+    image: $POD_IMAGE
+    command: ["sh", "-c", "while true; do echo hello-forbidden; sleep 1; done"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $SA_NAME
+  namespace: $ALLOWED_NS
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: $SA_NAME-pod-log-reader
+  namespace: $ALLOWED_NS
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: $SA_NAME-pod-log-reader
+  namespace: $ALLOWED_NS
+subjects:
+- kind: ServiceAccount
+  name: $SA_NAME
+  namespace: $ALLOWED_NS
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: $SA_NAME-pod-log-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: $SA_NAME-baseline
+rules:
+# Cluster-scoped nodes list/watch: the dashboard's source-watcher needs
+# this to resolve pod node/region/zone metadata.
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["list", "watch"]
+# Cluster-scoped access to the aggregated api.kubetail.com surface so the
+# cluster-api-proxy request can even reach the cluster-api. The actual
+# per-namespace pod-log authorization happens further down (cluster-agent
+# SAR), which is what this test exercises.
+- apiGroups: ["api.kubetail.com"]
+  resources: ["graphql"]
+  verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: $SA_NAME-baseline
+subjects:
+- kind: ServiceAccount
+  name: $SA_NAME
+  namespace: $ALLOWED_NS
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: $SA_NAME-baseline
