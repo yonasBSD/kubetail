@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 import requests
+import urllib3
 from dotenv import load_dotenv
+
+# e2e cluster-api uses a self-signed cert; suppress the noisy warning.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -131,7 +135,7 @@ def serve_url(cli, request):
 
 
 def assert_healthz(url):
-    resp = requests.get(f"{url}/healthz")
+    resp = requests.get(f"{url}/healthz", verify=False)
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
 

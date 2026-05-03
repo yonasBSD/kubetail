@@ -10,6 +10,9 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::urllib3.exceptions.InsecureRequestWarning",
+]
 markers = [
     "cluster: mark test as belonging to the cluster env",
     "cli: mark test as belonging to the cli env",
