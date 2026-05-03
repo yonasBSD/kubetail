@@ -1,7 +1,7 @@
 """Shared constants and helpers for namespace-scoped RBAC tests.
 
-Used by `test_namespace_rbac_cli.py` (kubetail serve / desktop env) and
-`test_namespace_rbac_cluster.py` (in-cluster dashboard + cluster-api-proxy).
+Used by test_namespace_rbac.py and the `restricted_sa_tokens` fixture in
+conftest.py.
 """
 
 import socket
@@ -12,10 +12,12 @@ from pathlib import Path
 import requests
 
 KUBECONFIG = "/tmp/kubetail-e2e.kubeconfig"
-ALLOWED_NS = "e2e-rbac-allowed"
-FORBIDDEN_NS = "e2e-rbac-forbidden"
-SA_NAME = "restricted-user"
+SA1_NS = "e2e-rbac-ns-1"
+SA2_NS = "e2e-rbac-ns-2"
+SA1_NAME = "restricted-user-1"
+SA2_NAME = "restricted-user-2"
 POD_IMAGE = "busybox:1.36"
+BASELINE_CLUSTER_ROLE = "e2e-rbac-baseline"
 
 _MANIFEST_PATH = Path(__file__).parent / "manifests" / "namespace_rbac.yaml.tmpl"
 
@@ -34,10 +36,12 @@ def kubectl(*args, check=True, input=None):
 
 def rendered_manifest():
     return string.Template(_MANIFEST_PATH.read_text()).substitute(
-        ALLOWED_NS=ALLOWED_NS,
-        FORBIDDEN_NS=FORBIDDEN_NS,
-        SA_NAME=SA_NAME,
+        SA1_NS=SA1_NS,
+        SA2_NS=SA2_NS,
+        SA1_NAME=SA1_NAME,
+        SA2_NAME=SA2_NAME,
         POD_IMAGE=POD_IMAGE,
+        BASELINE_CLUSTER_ROLE=BASELINE_CLUSTER_ROLE,
     )
 
 

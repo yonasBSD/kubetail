@@ -1,20 +1,24 @@
 """End-to-end namespace-scoped RBAC tests.
 
-A user whose RBAC only grants `pods/log` in `_ALLOWED_NS` must be denied
-when querying any other namespace's logs. Three paths are exercised:
+A user whose RBAC only grants `pods/log` in their own namespace must be
+denied when querying any other namespace's logs. Four paths are exercised:
 
 * `TestCliDashboard` — `kubetail serve` (desktop env). The kubeconfig's
   credentials *are* the identity; the dashboard's `DefaultDesktopAuthorizer`
   checks via SelfSubjectAccessReview before opening informers.
+
+* `TestCliApiProxy` — `kubetail serve`'s `/cluster-api-proxy/<ctx>/graphql`.
+  `DesktopProxy` forwards the kubeconfig user's bearer token through
+  kube-apiserver aggregation to the cluster-api -> cluster-agent.
 
 * `TestClusterDashboard` — in-cluster dashboard's `/graphql`. The user's
   bearer token is forwarded to the kube-apiserver per request, so the same
   SAR-based authorization applies.
 
 * `TestClusterApiProxy` — in-cluster dashboard's `/cluster-api-proxy/graphql`.
-  Token rides through kube-apiserver aggregation to the cluster-api, which
-  fans out gRPC to the cluster-agent; the cluster-agent runs SAR for
-  `pods/log` in the requested namespace as the user.
+  Token rides through `InClusterProxy` -> kube-apiserver aggregation to the
+  cluster-api, which fans out gRPC to the cluster-agent; the cluster-agent
+  runs SAR for `pods/log` in the requested namespace as the user.
 """
 
 import json
@@ -27,9 +31,9 @@ import pytest
 import requests
 
 from _namespace_rbac import (
-    ALLOWED_NS,
-    FORBIDDEN_NS,
-    SA_NAME,
+    SA1_NAME,
+    SA1_NS,
+    SA2_NS,
     free_port,
     has_authz_denial,
     kubectl,
@@ -53,6 +57,11 @@ _CLUSTER_API_LOG_METADATA = (
     "{items{id}}}"
 )
 
+# k3d names the kubeconfig context "k3d-<cluster>". The CLI's DesktopProxy
+# requires /cluster-api-proxy/<kubeContext>/<relPath>; in cluster mode the
+# InClusterProxy ignores the path tail.
+_E2E_KUBE_CONTEXT = "k3d-kubetail-e2e"
+
 
 def _post_graphql(base_url, path, query, variables, *, bearer=None):
     s, csrf = session(base_url)
@@ -71,8 +80,8 @@ def _post_graphql(base_url, path, query, variables, *, bearer=None):
 
 _NAMESPACE_CASES = pytest.mark.parametrize(
     "namespace,expect_denial",
-    [(FORBIDDEN_NS, True), (ALLOWED_NS, False)],
-    ids=["forbidden-denied", "allowed-not-denied"],
+    [(SA2_NS, True), (SA1_NS, False)],
+    ids=["sa1-on-sa2-ns-denied", "sa1-on-own-ns-allowed"],
 )
 
 
@@ -98,11 +107,11 @@ def _build_restricted_kubeconfig(token):
         "apiVersion": "v1",
         "kind": "Config",
         "clusters": [cluster_entry],
-        "users": [{"name": SA_NAME, "user": {"token": token}}],
+        "users": [{"name": SA1_NAME, "user": {"token": token}}],
         "contexts": [
             {
                 "name": context_name,
-                "context": {"cluster": cluster_entry["name"], "user": SA_NAME},
+                "context": {"cluster": cluster_entry["name"], "user": SA1_NAME},
             }
         ],
         "current-context": context_name,
@@ -110,8 +119,8 @@ def _build_restricted_kubeconfig(token):
 
 
 @pytest.fixture(scope="module")
-def restricted_serve_url(restricted_sa_token, cli):
-    kubeconfig = _build_restricted_kubeconfig(restricted_sa_token)
+def restricted_serve_url(restricted_sa_tokens, cli):
+    kubeconfig = _build_restricted_kubeconfig(restricted_sa_tokens[SA1_NS])
     fh = tempfile.NamedTemporaryFile(
         mode="w", suffix=".kubeconfig", delete=False
     )
@@ -165,6 +174,19 @@ class TestCliDashboard:
         assert has_authz_denial(body) == expect_denial, body
 
 
+class TestCliApiProxy:
+    pytestmark = [pytest.mark.cli]
+
+    @_NAMESPACE_CASES
+    def test_log_metadata_list(self, restricted_serve_url, namespace, expect_denial):
+        body = _post_graphql(
+            restricted_serve_url,
+            f"/cluster-api-proxy/{_E2E_KUBE_CONTEXT}/graphql",
+            _CLUSTER_API_LOG_METADATA, {"namespace": namespace},
+        )
+        assert has_authz_denial(body) == expect_denial, body
+
+
 # ---------------------------------------------------------------------------
 # Cluster env — in-cluster dashboard. Bearer token rides on each request.
 # ---------------------------------------------------------------------------
@@ -175,12 +197,12 @@ class TestClusterDashboard:
 
     @_NAMESPACE_CASES
     def test_log_records_fetch(
-        self, target_url, restricted_sa_token, namespace, expect_denial
+        self, target_url, restricted_sa_tokens, namespace, expect_denial
     ):
         body = _post_graphql(
             target_url, "/graphql",
             _DASHBOARD_LOG_FETCH, {"sources": [f"{namespace}:pods/chatter"]},
-            bearer=restricted_sa_token,
+            bearer=restricted_sa_tokens[SA1_NS],
         )
         assert has_authz_denial(body) == expect_denial, body
 
@@ -190,11 +212,37 @@ class TestClusterApiProxy:
 
     @_NAMESPACE_CASES
     def test_log_metadata_list(
-        self, target_url, restricted_sa_token, namespace, expect_denial
+        self, target_url, restricted_sa_tokens, namespace, expect_denial
     ):
         body = _post_graphql(
             target_url, "/cluster-api-proxy/graphql",
             _CLUSTER_API_LOG_METADATA, {"namespace": namespace},
-            bearer=restricted_sa_token,
+            bearer=restricted_sa_tokens[SA1_NS],
+        )
+        assert has_authz_denial(body) == expect_denial, body
+
+    @pytest.mark.parametrize(
+        "token_ns,query_ns,expect_denial",
+        [
+            (SA1_NS, SA1_NS, False),
+            (SA1_NS, SA2_NS, True),
+            (SA2_NS, SA2_NS, False),
+            (SA2_NS, SA1_NS, True),
+        ],
+        ids=["sa1-on-own", "sa1-on-other", "sa2-on-own", "sa2-on-other"],
+    )
+    def test_identity_keyed_authorization(
+        self, target_url, restricted_sa_tokens,
+        token_ns, query_ns, expect_denial,
+    ):
+        """Two SAs scoped to different namespaces (sa1 -> SA1_NS,
+        sa2 -> SA2_NS) must not bleed into each other. Same query,
+        two identities — exercises identity flow through kube-apiserver
+        aggregation -> cluster-api -> cluster-agent and the cluster-agent's
+        identity-keyed SAR cache."""
+        body = _post_graphql(
+            target_url, "/cluster-api-proxy/graphql",
+            _CLUSTER_API_LOG_METADATA, {"namespace": query_ns},
+            bearer=restricted_sa_tokens[token_ns],
         )
         assert has_authz_denial(body) == expect_denial, body

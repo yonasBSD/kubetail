@@ -147,16 +147,20 @@ def assert_healthz(url):
 
 
 @pytest.fixture(scope="session")
-def restricted_sa_token(_backend):
-    """Apply the namespace-scoped RBAC manifest and yield an SA bearer token.
+def restricted_sa_tokens(_backend):
+    """Apply the namespace-scoped RBAC manifest and yield SA bearer tokens.
 
-    Shared by the cli and cluster namespace-rbac tests so the cluster only
-    pays the manifest-apply cost once per backend.
+    Returns a dict mapping namespace -> token, where each SA's RBAC grants
+    pod/log access in that namespace only. Shared by the cli and cluster
+    namespace-rbac tests so the cluster only pays the manifest-apply cost
+    once per backend.
     """
     from _namespace_rbac import (
-        ALLOWED_NS,
-        FORBIDDEN_NS,
-        SA_NAME,
+        BASELINE_CLUSTER_ROLE,
+        SA1_NAME,
+        SA1_NS,
+        SA2_NAME,
+        SA2_NS,
         kubectl,
         rendered_manifest,
     )
@@ -166,21 +170,24 @@ def restricted_sa_token(_backend):
 
     kubectl("apply", "-f", "-", input=rendered_manifest())
     try:
-        token = kubectl(
-            "create", "token", SA_NAME, "-n", ALLOWED_NS, "--duration", "1h"
-        ).stdout.strip()
-        assert token, "empty token from `kubectl create token`"
-        yield token
+        tokens = {}
+        for ns, sa in [(SA1_NS, SA1_NAME), (SA2_NS, SA2_NAME)]:
+            tok = kubectl(
+                "create", "token", sa, "-n", ns, "--duration", "1h"
+            ).stdout.strip()
+            assert tok, f"empty token for {ns}/{sa}"
+            tokens[ns] = tok
+        yield tokens
     finally:
         # Best-effort cleanup; don't fail teardown if the cluster is gone.
-        kubectl("delete", "namespace", ALLOWED_NS, "--wait=false", check=False)
-        kubectl("delete", "namespace", FORBIDDEN_NS, "--wait=false", check=False)
+        for ns in (SA1_NS, SA2_NS):
+            kubectl("delete", "namespace", ns, "--wait=false", check=False)
         kubectl(
-            "delete", "clusterrolebinding", f"{SA_NAME}-baseline",
+            "delete", "clusterrolebinding", BASELINE_CLUSTER_ROLE,
             "--ignore-not-found", check=False,
         )
         kubectl(
-            "delete", "clusterrole", f"{SA_NAME}-baseline",
+            "delete", "clusterrole", BASELINE_CLUSTER_ROLE,
             "--ignore-not-found", check=False,
         )
 

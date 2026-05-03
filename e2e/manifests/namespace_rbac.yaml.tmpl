@@ -1,53 +1,60 @@
 # Test fixtures for test_namespace_rbac.py.
 #
-# Two namespaces with a chattering pod each, plus a ServiceAccount whose
-# RBAC grants pod/log access in $ALLOWED_NS only. Cluster-scoped
-# nodes list/watch is granted because the dashboard's source-watcher
-# needs it to resolve pod node/region/zone metadata; the actual claim
-# under test is the namespace-scoped pod-log restriction.
+# Two namespaces, each with a chattering pod and one ServiceAccount whose
+# RBAC grants pod/log access in *that* namespace only. From SA1's view
+# $SA2_NS is forbidden; from SA2's view $SA1_NS is — the
+# differential test in TestClusterApiProxy uses this asymmetry to verify
+# the cluster-agent's identity-keyed SAR cache. Both SAs share one
+# cluster-scoped baseline (nodes + api.kubetail.com/graphql).
 apiVersion: v1
 kind: Namespace
-metadata: {name: $ALLOWED_NS}
+metadata: {name: $SA1_NS}
 ---
 apiVersion: v1
 kind: Namespace
-metadata: {name: $FORBIDDEN_NS}
+metadata: {name: $SA2_NS}
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: chatter
-  namespace: $ALLOWED_NS
+  namespace: $SA1_NS
 spec:
   restartPolicy: Always
   containers:
   - name: chatter
     image: $POD_IMAGE
-    command: ["sh", "-c", "while true; do echo hello-allowed; sleep 1; done"]
+    command: ["sh", "-c", "while true; do echo hello-from-ns-1; sleep 1; done"]
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: chatter
-  namespace: $FORBIDDEN_NS
+  namespace: $SA2_NS
 spec:
   restartPolicy: Always
   containers:
   - name: chatter
     image: $POD_IMAGE
-    command: ["sh", "-c", "while true; do echo hello-forbidden; sleep 1; done"]
+    command: ["sh", "-c", "while true; do echo hello-from-ns-2; sleep 1; done"]
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: $SA_NAME
-  namespace: $ALLOWED_NS
+  name: $SA1_NAME
+  namespace: $SA1_NS
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: $SA2_NAME
+  namespace: $SA2_NS
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: $SA_NAME-pod-log-reader
-  namespace: $ALLOWED_NS
+  name: $SA1_NAME-pod-log-reader
+  namespace: $SA1_NS
 rules:
 - apiGroups: [""]
   resources: ["pods", "pods/log"]
@@ -56,21 +63,45 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: $SA_NAME-pod-log-reader
-  namespace: $ALLOWED_NS
+  name: $SA1_NAME-pod-log-reader
+  namespace: $SA1_NS
 subjects:
 - kind: ServiceAccount
-  name: $SA_NAME
-  namespace: $ALLOWED_NS
+  name: $SA1_NAME
+  namespace: $SA1_NS
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: $SA_NAME-pod-log-reader
+  name: $SA1_NAME-pod-log-reader
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: $SA2_NAME-pod-log-reader
+  namespace: $SA2_NS
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: $SA2_NAME-pod-log-reader
+  namespace: $SA2_NS
+subjects:
+- kind: ServiceAccount
+  name: $SA2_NAME
+  namespace: $SA2_NS
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: $SA2_NAME-pod-log-reader
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: $SA_NAME-baseline
+  name: $BASELINE_CLUSTER_ROLE
 rules:
 # Cluster-scoped nodes list/watch: the dashboard's source-watcher needs
 # this to resolve pod node/region/zone metadata.
@@ -88,12 +119,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: $SA_NAME-baseline
+  name: $BASELINE_CLUSTER_ROLE
 subjects:
 - kind: ServiceAccount
-  name: $SA_NAME
-  namespace: $ALLOWED_NS
+  name: $SA1_NAME
+  namespace: $SA1_NS
+- kind: ServiceAccount
+  name: $SA2_NAME
+  namespace: $SA2_NS
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: $SA_NAME-baseline
+  name: $BASELINE_CLUSTER_ROLE

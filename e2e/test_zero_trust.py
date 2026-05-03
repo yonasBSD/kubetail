@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 import requests
@@ -16,6 +17,14 @@ pytestmark = [pytest.mark.cluster, pytest.mark.kubetail_api]
 _KUBECONFIG = "/tmp/kubetail-e2e.kubeconfig"
 _NS = "kubetail-system"
 _AGGREGATED_BASE = "/apis/api.kubetail.com/v1"
+
+# Self-signed cert that chains to neither the cluster-api's client-CA pool
+# nor its requestheader-client-CA pool. Used to exercise the middleware's
+# "no valid certificate found" branch — see e2e/tls/README.md.
+_UNTRUSTED_CLIENT_CERT = (
+    str(Path(__file__).parent / "tls" / "untrusted-client.crt"),
+    str(Path(__file__).parent / "tls" / "untrusted-client.key"),
+)
 
 
 class TestClusterAPIAggregationGate:
@@ -39,6 +48,40 @@ class TestClusterAPIAggregationGate:
         # Unaggregated root /healthz is intentionally open for the kubelet probe.
         r = requests.get(f"{cluster_api_url}/healthz", verify=False)
         assert r.status_code == 200
+
+    def test_spoofed_front_proxy_headers_rejected(self, cluster_api_url):
+        """Front-proxy impersonation headers without any client cert must
+        not grant identity. Trips the middleware's first gate
+        (`len(r.TLS.PeerCertificates) == 0`) before header parsing."""
+        r = requests.post(
+            f"{cluster_api_url}{_AGGREGATED_BASE}/graphql",
+            json={"query": "{__typename}"},
+            headers={
+                "X-Remote-User": "system:masters",
+                "X-Remote-Group": "system:masters",
+                "X-Remote-Extra-foo": "bar",
+            },
+            verify=False,
+        )
+        assert r.status_code == 401
+
+    def test_untrusted_client_cert_with_spoofed_headers_rejected(self, cluster_api_url):
+        """Same spoofed headers but with a TLS client cert that chains to
+        neither the client-CA nor requestheader-client-CA pool. Exercises
+        the middleware's `no valid certificate found` branch — proves the
+        listener actually presents both CA pools and that *having* a cert
+        isn't sufficient to reach the header-parsing path."""
+        r = requests.post(
+            f"{cluster_api_url}{_AGGREGATED_BASE}/graphql",
+            json={"query": "{__typename}"},
+            headers={
+                "X-Remote-User": "system:masters",
+                "X-Remote-Group": "system:masters",
+            },
+            cert=_UNTRUSTED_CLIENT_CERT,
+            verify=False,
+        )
+        assert r.status_code == 401
 
     @pytest.mark.usefixtures("cluster_api_url")
     def test_through_kube_apiserver_authorized(self):
