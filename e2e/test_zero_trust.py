@@ -290,46 +290,43 @@ def _call_list(channel: grpc.Channel, *, metadata=()) -> grpc.RpcError:
 
 
 class TestClusterAgentAuthGate:
-    """Even with a valid mTLS handshake, the cluster-agent's trust-chain
-    interceptor (`crates/cluster_agent/src/auth.rs::check`) must reject any
-    request whose forwarded identity is missing or whose peer-cert CN isn't
-    on the allowed-names list. The dashboard never dials the agent directly
-    — only cluster-api does, after kube-apiserver has authenticated the user
-    — so any request that bypasses that chain (or impersonates without an
-    `x-remote-user` header) must fail closed."""
+    """A valid mTLS handshake is necessary but not sufficient: the agent's
+    trust-chain interceptor (crates/cluster_agent/src/auth.rs) must also see
+    a forwarded identity from a CN on the allowed-names list. Each parametrized
+    case below asserts a different way that gate must fail closed."""
 
-    def test_grpc_call_without_user_metadata_rejected(self, cluster_agent_local_port):
-        """mTLS succeeds (the cluster-api cert is on the allowlist), but the
-        request carries no `x-remote-user` metadata. Without a forwarded
-        identity the agent has no user to authorize against — answering
-        anyway would mean serving data under the cluster-api SA's privileges,
-        which is exactly the escalation the design forbids."""
-        with _grpc_channel(
-            _CLUSTER_API_CLIENT_CERT, _CLUSTER_API_CLIENT_KEY, cluster_agent_local_port,
-        ) as channel:
-            err = _call_list(channel)
-        assert err.code() == grpc.StatusCode.UNAUTHENTICATED, (err.code(), err.details())
-
-    def test_grpc_call_with_empty_user_metadata_rejected(self, cluster_agent_local_port):
-        """An empty `x-remote-user` value is treated the same as missing — the
-        interceptor must not fall back to anonymous-but-trusted."""
-        with _grpc_channel(
-            _CLUSTER_API_CLIENT_CERT, _CLUSTER_API_CLIENT_KEY, cluster_agent_local_port,
-        ) as channel:
-            err = _call_list(channel, metadata=(("x-remote-user", ""),))
-        assert err.code() == grpc.StatusCode.UNAUTHENTICATED, (err.code(), err.details())
-
-    def test_grpc_call_with_valid_ca_but_disallowed_cn_rejected(self, cluster_agent_local_port):
-        """The cluster-agent's own serving cert chains to the same CA as the
-        cluster-api client cert, so TLS verification passes. But its CN
-        (`kubetail-cluster-agent...`) isn't on the agent's `allowed-names`
-        list, so the interceptor must reject — proving CA membership alone
-        does not confer the right to forward identities."""
-        with _grpc_channel(
-            _CLUSTER_AGENT_CERT, _CLUSTER_AGENT_KEY, cluster_agent_local_port,
-        ) as channel:
-            err = _call_list(
-                channel,
-                metadata=(("x-remote-user", "spoofed-attacker"), ("x-remote-group", "system:masters")),
-            )
-        assert err.code() == grpc.StatusCode.PERMISSION_DENIED, (err.code(), err.details())
+    @pytest.mark.parametrize(
+        "case,cert,key,metadata,expected",
+        [
+            # Allowlisted CN, no forwarded identity — answering would serve data
+            # under the cluster-api SA's privileges.
+            (
+                "missing_user_metadata",
+                _CLUSTER_API_CLIENT_CERT, _CLUSTER_API_CLIENT_KEY,
+                (),
+                grpc.StatusCode.UNAUTHENTICATED,
+            ),
+            # Empty value must not be treated as anonymous-but-trusted.
+            (
+                "empty_user_metadata",
+                _CLUSTER_API_CLIENT_CERT, _CLUSTER_API_CLIENT_KEY,
+                (("x-remote-user", ""),),
+                grpc.StatusCode.UNAUTHENTICATED,
+            ),
+            # CA membership alone doesn't confer the right to forward identities:
+            # the agent's own cert chains to kubetail-ca but its CN isn't on
+            # the allowlist.
+            (
+                "valid_ca_but_disallowed_cn",
+                _CLUSTER_AGENT_CERT, _CLUSTER_AGENT_KEY,
+                (("x-remote-user", "spoofed-attacker"), ("x-remote-group", "system:masters")),
+                grpc.StatusCode.PERMISSION_DENIED,
+            ),
+        ],
+        ids=lambda v: v if isinstance(v, str) else None,
+    )
+    def test_rejected(self, cluster_agent_local_port, case, cert, key, metadata, expected):
+        del case  # used as the parametrize id
+        with _grpc_channel(cert, key, cluster_agent_local_port) as channel:
+            err = _call_list(channel, metadata=metadata)
+        assert err.code() == expected, (err.code(), err.details())
