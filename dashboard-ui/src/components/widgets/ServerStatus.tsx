@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { useSubscription } from '@apollo/client/react';
 import { Fragment, useEffect } from 'react';
 import { atom, useAtomValue, useSetAtom } from 'jotai';
 
@@ -20,8 +19,6 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle, DialogTrigger } 
 import { Table, TableBody, TableCell, TableRow } from '@kubetail/ui/elements/table';
 
 import appConfig from '@/app-config';
-import ClusterAPIInstallButton from '@/components/widgets/ClusterAPIInstallButton';
-import * as dashboardOps from '@/lib/graphql/dashboard/ops';
 import {
   ServerStatus,
   Status,
@@ -29,6 +26,8 @@ import {
   useKubernetesAPIServerStatus,
   useClusterAPIServerStatus,
 } from '@/lib/server-status';
+import { useKubeConfig } from '@/lib/kubeconfig';
+import { useClusterUpdateNotification } from '@/lib/update-notifications';
 import { cn } from '@/lib/util';
 
 const kubernetesAPIServerStatusMapState = atom(new Map<string, ServerStatus>());
@@ -170,6 +169,10 @@ const KubernetesAPIServerStatusRow = ({ kubeContext, dashboardServerStatus }: Se
 const ClusterAPIServerStatusRow = ({ kubeContext, dashboardServerStatus }: ServerStatusRowProps) => {
   const serverStatusMap = useAtomValue(clusterAPIServerStatusMapState);
   const serverStatus = serverStatusMap.get(kubeContext) || new ServerStatus();
+  const { updateAvailable } = useClusterUpdateNotification(appConfig.environment === 'desktop' ? kubeContext : '');
+
+  const isInstalled = serverStatus.status !== Status.NotFound && serverStatus.status !== Status.Unknown;
+  const showClusterUpdate = appConfig.environment === 'desktop' && updateAvailable && isInstalled;
 
   return (
     <TableRow>
@@ -181,11 +184,25 @@ const ClusterAPIServerStatusRow = ({ kubeContext, dashboardServerStatus }: Serve
           <TableCell className="w-px">
             <HealthDot status={serverStatus.status} />
           </TableCell>
-          <TableCell className="whitespace-normal flex justify-between items-center">
-            {statusMessage(serverStatus, 'Uknown')}
-            {appConfig.environment === 'desktop' && serverStatus.status === Status.NotFound && (
-              <ClusterAPIInstallButton kubeContext={kubeContext} />
-            )}
+          <TableCell className="whitespace-normal">
+            <div className="flex flex-wrap items-center gap-2">
+              <span>{statusMessage(serverStatus, 'Uknown')}</span>
+              {appConfig.environment === 'desktop' && serverStatus.status === Status.NotFound && (
+                <a
+                  href="https://docs.kubetail.com/guides/cluster/installation"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-xs text-blue-900 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-100 dark:hover:bg-blue-900"
+                >
+                  Install
+                </a>
+              )}
+              {showClusterUpdate && (
+                <span className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-xs text-blue-900 dark:border-blue-800 dark:bg-blue-950 dark:text-blue-100">
+                  Update available
+                </span>
+              )}
+            </div>
           </TableCell>
         </>
       )}
@@ -207,14 +224,8 @@ type ServerStatusWidgetProps = {
 };
 
 const ServerStatusWidget = ({ className, healthDotClassName }: ServerStatusWidgetProps) => {
-  const { data } = useSubscription(dashboardOps.KUBE_CONFIG_WATCH, { skip: appConfig.environment === 'cluster' });
-
-  const kubeContexts = new Array<string>();
-  if (appConfig.environment === 'cluster') {
-    kubeContexts.push('');
-  } else {
-    data?.kubeConfigWatch?.object?.contexts.map((context) => kubeContexts.push(context.name));
-  }
+  const { data } = useKubeConfig();
+  const kubeContexts = appConfig.environment !== 'desktop' ? [''] : (data?.contexts?.map((c) => c.name) ?? []);
 
   const dashboardServerStatus = useDashboardServerStatus();
   const kubernetesAPIServertatusMap = useAtomValue(kubernetesAPIServerStatusMapState);

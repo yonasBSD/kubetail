@@ -13,12 +13,17 @@
 // limitations under the License.
 
 import { useQuery } from '@apollo/client/react';
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { atom, useAtom, useAtomValue, useSetAtom } from 'jotai';
+import { atomWithStorage } from 'jotai/utils';
+import { atomFamily } from 'jotai-family';
+import { useEffect, useMemo } from 'react';
 
 import appConfig from '@/app-config';
-import { CLI_LATEST_VERSION } from '@/lib/graphql/dashboard/ops';
+import { CLI_LATEST_VERSION, CLUSTER_VERSION_STATUS } from '@/lib/graphql/dashboard/ops';
+import { kubeConfigAtom, useKubeConfig } from '@/lib/kubeconfig';
 
-const STORAGE_KEY = 'kubetail:updates:cli';
+const STORAGE_KEY_CLI = 'kubetail:updates:cli';
+const CLUSTER_STORAGE_PREFIX = 'kubetail:updates:cluster:';
 
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const DISMISS_TTL_MS = 24 * 60 * 60 * 1000;
@@ -29,6 +34,18 @@ interface UpdateState {
   fetchedAt?: number;
   dismissedAt?: number;
   skippedVersions?: string[];
+}
+
+interface ClusterUpdateState extends UpdateState {
+  currentVersion?: string;
+}
+
+function isCLICacheValid(state: UpdateState): boolean {
+  return !!state.latestVersion && !!state.fetchedAt && Date.now() - state.fetchedAt < CACHE_TTL_MS;
+}
+
+function isClusterCacheValid(state: ClusterUpdateState): boolean {
+  return state.fetchedAt !== undefined && Date.now() - state.fetchedAt < CACHE_TTL_MS;
 }
 
 export function compareSemver(a: string, b: string): number {
@@ -42,100 +59,194 @@ export function compareSemver(a: string, b: string): number {
   return 0;
 }
 
-function readState(): UpdateState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-
-function writeState(state: UpdateState) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {
-    // fail silently
-  }
-}
-
-function patchState(patch: Partial<UpdateState>) {
-  writeState({ ...readState(), ...patch });
-}
-
-function isCacheValid(state: UpdateState): boolean {
-  return !!state.latestVersion && !!state.fetchedAt && Date.now() - state.fetchedAt < CACHE_TTL_MS;
-}
-
-export interface UpdateNotificationState {
-  showBanner: boolean;
-  currentVersion: string;
+interface BaseUpdateNotificationState {
   latestVersion: string | null;
-  updateAvailable: boolean;
   dismiss: () => void;
   dontRemindMe: () => void;
 }
 
-const UpdateNotificationContext = createContext({} as UpdateNotificationState);
+export interface UpdateNotificationState extends BaseUpdateNotificationState {
+  showBanner: boolean;
+  currentVersion: string;
+  updateAvailable: boolean;
+}
 
-export function UpdateNotificationProvider({ children }: React.PropsWithChildren) {
-  const isDesktop = appConfig.environment === 'desktop';
+export interface ClusterUpdateNotificationState extends BaseUpdateNotificationState {
+  updateAvailable: boolean;
+  currentVersion: string | null;
+}
+
+// --- Atoms (single source of truth)
+
+// atomWithStorage handles localStorage read/write AND cross-tab sync via the storage event.
+const cliPersistedAtom = atomWithStorage<UpdateState>(STORAGE_KEY_CLI, {});
+
+const clusterPersistedAtomFamily = atomFamily((kubeContext: string) =>
+  atomWithStorage<ClusterUpdateState>(`${CLUSTER_STORAGE_PREFIX}${kubeContext}`, {}),
+);
+
+const readyAtom = atom(false);
+
+// --- Derived view atoms
+
+const cliViewAtom = atom<Omit<UpdateNotificationState, 'dismiss' | 'dontRemindMe'>>((get) => {
+  const persisted = get(cliPersistedAtom);
+  const ready = get(readyAtom);
   const currentVersion = appConfig.cliVersion;
-  const [ready, setReady] = useState(false);
-  const [state, setState] = useState(() => readState());
-  const [now] = useState(() => Date.now());
 
-  const cacheValid = isCacheValid(state);
+  const cacheValid = isCLICacheValid(persisted);
+  const latestVersion = cacheValid ? persisted.latestVersion! : null;
 
-  useEffect(() => {
-    const timer = setTimeout(() => setReady(true), SHOW_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, []);
+  const updateAvailable =
+    currentVersion !== '' && latestVersion !== null && compareSemver(latestVersion, currentVersion) > 0;
+  const dismissed = persisted.dismissedAt !== undefined && Date.now() - persisted.dismissedAt < DISMISS_TTL_MS;
+  const skipped = latestVersion !== null && (persisted.skippedVersions ?? []).includes(latestVersion);
+
+  return {
+    showBanner: ready && !dismissed && updateAvailable && !skipped,
+    currentVersion,
+    latestVersion,
+    updateAvailable,
+  };
+});
+
+type ClusterView = Omit<ClusterUpdateNotificationState, 'dismiss' | 'dontRemindMe'>;
+
+const clusterViewAtomFamily = atomFamily((kubeContext: string) =>
+  atom<ClusterView>((get) => {
+    const persisted = get(clusterPersistedAtomFamily(kubeContext));
+    const cacheValid = isClusterCacheValid(persisted);
+    const currentVersion = cacheValid ? (persisted.currentVersion ?? null) : null;
+    const latestVersion = cacheValid ? (persisted.latestVersion ?? null) : null;
+
+    const updateAvailable =
+      currentVersion !== null && latestVersion !== null && compareSemver(latestVersion, currentVersion) > 0;
+    const dismissed = persisted.dismissedAt !== undefined && Date.now() - persisted.dismissedAt < DISMISS_TTL_MS;
+    const skipped = latestVersion !== null && (persisted.skippedVersions ?? []).includes(latestVersion);
+
+    return {
+      updateAvailable: updateAvailable && !dismissed && !skipped,
+      currentVersion,
+      latestVersion,
+    };
+  }),
+);
+
+const allClusterViewsAtom = atom((get) => {
+  const cfg = get(kubeConfigAtom);
+  const names = appConfig.environment !== 'desktop' ? [''] : (cfg.data?.contexts?.map((c) => c.name) ?? []);
+  return names.map((kubeContext) => ({ kubeContext, view: get(clusterViewAtomFamily(kubeContext)) }));
+});
+
+const hasAnyClusterUpdateAtom = atom((get) => get(allClusterViewsAtom).some(({ view }) => view.updateAvailable));
+
+// --- Side-effect components mounted by the provider
+
+function CLIFetcher() {
+  const [persisted, setPersisted] = useAtom(cliPersistedAtom);
+  const cacheValid = isCLICacheValid(persisted);
 
   const { data } = useQuery(CLI_LATEST_VERSION, {
-    skip: !isDesktop || !currentVersion || cacheValid,
+    skip: !appConfig.cliVersion || cacheValid,
     fetchPolicy: 'network-only',
   });
 
   useEffect(() => {
     const version = data?.cliLatestVersion;
-    if (version) patchState({ latestVersion: version, fetchedAt: Date.now() });
-  }, [data]);
+    if (!version) return;
+    setPersisted((prev) => ({ ...prev, latestVersion: version, fetchedAt: Date.now() }));
+  }, [data, setPersisted]);
 
-  const latestVersion = cacheValid ? state.latestVersion! : (data?.cliLatestVersion ?? null);
-
-  const updateAvailable =
-    currentVersion !== '' && latestVersion !== null && compareSemver(latestVersion, currentVersion) > 0;
-
-  const dismissed = state.dismissedAt !== undefined && now - state.dismissedAt < DISMISS_TTL_MS;
-  const skipped = latestVersion !== null && (state.skippedVersions ?? []).includes(latestVersion);
-  const hasUpdate = updateAvailable && !skipped;
-
-  const showBanner = ready && !dismissed && hasUpdate;
-
-  const dismiss = useCallback(() => {
-    patchState({ dismissedAt: Date.now() });
-    setState(readState());
-  }, []);
-
-  const dontRemindMe = useCallback(() => {
-    const { skippedVersions = [] } = readState();
-    if (latestVersion && !skippedVersions.includes(latestVersion)) {
-      skippedVersions.push(latestVersion);
-    }
-    patchState({ skippedVersions, dismissedAt: Date.now() });
-    setState(readState());
-  }, [latestVersion]);
-
-  const value = useMemo(
-    () => ({ showBanner, currentVersion, latestVersion, updateAvailable, dismiss, dontRemindMe }),
-    [showBanner, currentVersion, latestVersion, updateAvailable, dismiss, dontRemindMe],
-  );
-
-  return <UpdateNotificationContext.Provider value={value}>{children}</UpdateNotificationContext.Provider>;
+  return null;
 }
 
-export function useUpdateNotification(): UpdateNotificationState {
-  return useContext(UpdateNotificationContext);
+function ClusterVersionFetcher({ kubeContext }: { kubeContext: string }) {
+  const [persisted, setPersisted] = useAtom(clusterPersistedAtomFamily(kubeContext));
+  const cacheValid = isClusterCacheValid(persisted);
+
+  const { data, error, loading } = useQuery(CLUSTER_VERSION_STATUS, {
+    skip: !kubeContext || cacheValid,
+    variables: { kubeContext },
+    fetchPolicy: 'network-only',
+  });
+
+  useEffect(() => {
+    if (!kubeContext || cacheValid) return;
+    if (loading || error) return;
+    if (data === undefined) return;
+
+    const result = data.clusterVersionStatus;
+    setPersisted((prev) => ({
+      ...prev,
+      currentVersion: result?.currentVersion ?? undefined,
+      latestVersion: result?.latestVersion ?? undefined,
+      fetchedAt: Date.now(),
+    }));
+  }, [data, error, loading, kubeContext, cacheValid, setPersisted]);
+
+  return null;
+}
+
+/**
+ * Mounts the kubeconfig subscriber, the CLI fetcher, and one cluster fetcher per kubeContext.
+ * All shared state lives in atoms; this component only runs side effects.
+ */
+export function UpdateNotificationProvider({ children }: React.PropsWithChildren) {
+  const isDesktop = appConfig.environment === 'desktop';
+  const setReady = useSetAtom(readyAtom);
+  const { data } = useKubeConfig();
+  const kubeContexts = isDesktop ? (data?.contexts?.map((c) => c.name) ?? []) : [''];
+
+  // Delay showing the CLI banner so it does not flash on cold load.
+  useEffect(() => {
+    const timer = setTimeout(() => setReady(true), SHOW_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [setReady]);
+
+  return (
+    <>
+      {isDesktop && <CLIFetcher />}
+      {kubeContexts.map((ctx) => (
+        <ClusterVersionFetcher key={ctx || '__default__'} kubeContext={ctx} />
+      ))}
+      {children}
+    </>
+  );
+}
+
+// --- Public hooks
+
+function buildDismissHandlers<T extends UpdateState>(
+  setPersisted: (updater: (prev: T) => T) => void,
+  latestVersion: string | null,
+): { dismiss: () => void; dontRemindMe: () => void } {
+  return {
+    dismiss: () => setPersisted((prev) => ({ ...prev, dismissedAt: Date.now() })),
+    dontRemindMe: () =>
+      setPersisted((prev) => {
+        const skipped = prev.skippedVersions ?? [];
+        const next = latestVersion && !skipped.includes(latestVersion) ? [...skipped, latestVersion] : skipped;
+        return { ...prev, skippedVersions: next, dismissedAt: Date.now() };
+      }),
+  };
+}
+
+export function useCLIUpdateNotification(): UpdateNotificationState {
+  const view = useAtomValue(cliViewAtom);
+  const setPersisted = useSetAtom(cliPersistedAtom);
+  return useMemo(() => ({ ...view, ...buildDismissHandlers(setPersisted, view.latestVersion) }), [view, setPersisted]);
+}
+
+export function useClusterUpdateNotification(kubeContext: string): ClusterUpdateNotificationState {
+  const view = useAtomValue(clusterViewAtomFamily(kubeContext));
+  const setPersisted = useSetAtom(clusterPersistedAtomFamily(kubeContext));
+  return useMemo(() => ({ ...view, ...buildDismissHandlers(setPersisted, view.latestVersion) }), [view, setPersisted]);
+}
+
+export function useHasAnyClusterUpdate(): boolean {
+  return useAtomValue(hasAnyClusterUpdateAtom);
+}
+
+export function useAllClusterUpdateViews(): { kubeContext: string; view: ClusterView }[] {
+  return useAtomValue(allClusterViewsAtom);
 }
