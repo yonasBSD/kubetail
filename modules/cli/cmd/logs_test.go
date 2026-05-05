@@ -41,6 +41,16 @@ func TestLoadLogConfig(t *testing.T) {
 		assert.Equal(t, int64(10), cmdCfg.tailVal)
 	})
 
+	t.Run("--since without head/tail/all resolves to head mode", func(t *testing.T) {
+		cmd := &cobra.Command{}
+		addLogsCmdFlags(cmd)
+		cmd.Flags().Set("since", "PT30M")
+
+		cmdCfg, err := loadLogsCmdConfig(cmd)
+		assert.NoError(t, err)
+		assert.Equal(t, logsStreamModeHead, cmdCfg.resolvedMode)
+	})
+
 	t.Run("--tail=0 propagates as tailVal=0", func(t *testing.T) {
 		cmd := &cobra.Command{}
 		addLogsCmdFlags(cmd)
@@ -126,6 +136,109 @@ func TestLoadLogConfig(t *testing.T) {
 	})
 }
 
+func TestBuildClusterAPIStreamConfig(t *testing.T) {
+	t.Run("passes through base fields", func(t *testing.T) {
+		cmdCfg := &logsCmdConfig{
+			kubecontext:  "ctx-1",
+			grep:         "GET /about",
+			follow:       true,
+			resolvedMode: logsStreamModeTail,
+			tailVal:      10,
+		}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"deployments/web", "deployments/api"})
+
+		assert.Equal(t, "ctx-1", got.KubeContext)
+		assert.Equal(t, []string{"deployments/web", "deployments/api"}, got.Sources)
+		assert.Equal(t, "GET /about", got.Grep)
+		assert.True(t, got.Follow)
+	})
+
+	t.Run("formats since/until as RFC3339Nano", func(t *testing.T) {
+		since := time.Date(2024, 1, 2, 15, 4, 5, 123456789, time.UTC)
+		until := time.Date(2024, 1, 2, 16, 0, 0, 0, time.UTC)
+		cmdCfg := &logsCmdConfig{
+			sinceTime:    since,
+			untilTime:    until,
+			resolvedMode: logsStreamModeTail,
+			tailVal:      10,
+		}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"x"})
+
+		assert.Equal(t, since.Format(time.RFC3339Nano), got.Since)
+		assert.Equal(t, until.Format(time.RFC3339Nano), got.Until)
+	})
+
+	t.Run("omits since/until when zero", func(t *testing.T) {
+		cmdCfg := &logsCmdConfig{resolvedMode: logsStreamModeTail, tailVal: 10}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"x"})
+
+		assert.Empty(t, got.Since)
+		assert.Empty(t, got.Until)
+	})
+
+	t.Run("head mode sets HEAD with limit and no pagination", func(t *testing.T) {
+		cmdCfg := &logsCmdConfig{resolvedMode: logsStreamModeHead, headVal: 25}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"x"})
+
+		assert.Equal(t, "HEAD", got.Mode)
+		assert.Equal(t, 25, got.Limit)
+	})
+
+	t.Run("all mode sets HEAD with paginate and no limit", func(t *testing.T) {
+		cmdCfg := &logsCmdConfig{resolvedMode: logsStreamModeAll}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"x"})
+
+		assert.Equal(t, "HEAD", got.Mode)
+		assert.Zero(t, got.Limit, "--all must not impose a client-side limit cap")
+		assert.True(t, got.Paginate, "--all must walk every page via NextCursor")
+	})
+
+	t.Run("head mode does not paginate", func(t *testing.T) {
+		cmdCfg := &logsCmdConfig{resolvedMode: logsStreamModeHead, headVal: 25}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"x"})
+
+		assert.False(t, got.Paginate, "--head=N must stop after one page")
+	})
+
+	t.Run("tail mode sets TAIL with limit", func(t *testing.T) {
+		cmdCfg := &logsCmdConfig{resolvedMode: logsStreamModeTail, tailVal: 50}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"x"})
+
+		assert.Equal(t, "TAIL", got.Mode)
+		assert.Equal(t, 50, got.Limit)
+	})
+
+	t.Run("tail mode with tailVal=0 skips bootstrap", func(t *testing.T) {
+		// --tail=0 is the "follow only, no backlog" path — leaving Mode empty
+		// tells Stream.Start to skip the bootstrap fetch entirely.
+		cmdCfg := &logsCmdConfig{resolvedMode: logsStreamModeTail, tailVal: 0, follow: true}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"x"})
+
+		assert.Empty(t, got.Mode, "tail=0 must leave Mode empty to skip bootstrap")
+		assert.Zero(t, got.Limit)
+		assert.True(t, got.Follow)
+	})
+
+	t.Run("passes through source filters", func(t *testing.T) {
+		cmdCfg := &logsCmdConfig{
+			resolvedMode: logsStreamModeTail,
+			tailVal:      10,
+			regionList:   []string{"us-east-1", "us-east-2"},
+			zoneList:     []string{"us-east-1a"},
+			osList:       []string{"linux"},
+			archList:     []string{"amd64", "arm64"},
+			nodeList:     []string{"node-1"},
+		}
+		got := buildClusterAPIStreamConfig(cmdCfg, []string{"x"})
+
+		assert.Equal(t, []string{"us-east-1", "us-east-2"}, got.Regions)
+		assert.Equal(t, []string{"us-east-1a"}, got.Zones)
+		assert.Equal(t, []string{"linux"}, got.OSes)
+		assert.Equal(t, []string{"amd64", "arm64"}, got.Arches)
+		assert.Equal(t, []string{"node-1"}, got.Nodes)
+	})
+}
+
 func TestPrintLogs(t *testing.T) {
 	s1 := logs.LogSource{
 		PodName:       "pod1",
@@ -192,16 +305,17 @@ func TestPrintLogs(t *testing.T) {
 	}, {
 		name: "cursors with tail mode",
 		cmdCfg: logsCmdConfig{
-			columns:     []string{"timestamp", "dot"},
-			withCursors: true,
+			columns:      []string{"timestamp", "dot"},
+			withCursors:  true,
+			resolvedMode: logsStreamModeTail,
 		},
 		wantContains: []string{"--- Prev page: --before 2025-03-13T11:42:01.123456789Z ---", "hello message 1"},
 	}, {
 		name: "cursors with head mode",
 		cmdCfg: logsCmdConfig{
-			columns:     []string{"timestamp", "dot"},
-			withCursors: true,
-			head:        true,
+			columns:      []string{"timestamp", "dot"},
+			withCursors:  true,
+			resolvedMode: logsStreamModeHead,
 		},
 		wantContains: []string{"--- Next page: --after 2025-03-13T11:45:02.123456789Z ---", "hello message 1"},
 	}}

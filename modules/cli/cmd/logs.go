@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -28,9 +29,9 @@ import (
 	"time"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"k8s.io/client-go/rest"
 
 	sharedcfg "github.com/kubetail-org/kubetail/modules/shared/config"
 	"github.com/kubetail-org/kubetail/modules/shared/k8shelpers"
@@ -53,39 +54,102 @@ const (
 // BackendFlag is the name of the --backend CLI flag.
 const BackendFlag = "backend"
 
-const grepKubernetesBackendWarning = `Warning: --grep on the Kubernetes API backend downloads all matching records to the client and filters locally, which can be slow and high-volume.
-For node-local server-side filtering, install the Kubetail API:
+// ansiYellow / ansiReset wrap warning messages in the conventional terminal
+// warning color when the destination is an interactive terminal. Applied via
+// colorizeWarning so redirected/CI output stays free of escape sequences.
+const ansiYellow = "\033[33m"
+const ansiReset = "\033[0m"
 
-    kubetail cluster install
-`
+const grepKubernetesBackendWarning = "Warning: Kubernetes API backend filters records locally. Use Kubetail API backend for remote grep.\n"
+
+const kubetailFallbackWarning = "Warning: Kubetail API not found, falling back to Kubernetes API backend (run `kubetail cluster install`)\n"
+
+// useColor reports whether ANSI color escapes are appropriate for w. True
+// only when w is an interactive terminal (i.e. an *os.File whose fd is a
+// TTY) and the NO_COLOR convention (https://no-color.org) is not active.
+// Used to keep redirected stdout/stderr, pipes, and CI logs free of raw
+// \033[...] sequences while preserving color on real terminals.
+func useColor(w any) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fd := f.Fd()
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
+}
+
+// colorizeWarning wraps msg in yellow ANSI escapes only when w is an
+// interactive terminal and NO_COLOR is unset.
+func colorizeWarning(w any, msg string) string {
+	if !useColor(w) {
+		return msg
+	}
+	return ansiYellow + strings.TrimSuffix(msg, "\n") + ansiReset + "\n"
+}
+
+// stripUncoloredDot removes the "dot" column when color rendering is off.
+// The dot indicator carries its meaning through color (one shade per
+// container ID), so a monochrome bullet is just visual noise.
+func stripUncoloredDot(cols []string, color bool) []string {
+	if color {
+		return cols
+	}
+	out := make([]string, 0, len(cols))
+	for _, c := range cols {
+		if c == "dot" {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
 
 // selectBackend resolves the user's --backend choice into a concrete
-// backendChoice. With "auto", the probe decides; probe errors fall back to
-// the Kubernetes backend so the CLI still works on degraded clusters. With
-// "kubetail", probe errors and unavailability are surfaced loudly so the
-// user knows their explicit request can't be honored.
-func selectBackend(ctx context.Context, flag string, probe func(context.Context) (bool, error)) (backendChoice, error) {
+// backendChoice by attempting the kubetail backend when relevant. The
+// tryKubetail closure is expected to actually issue a request to the
+// cluster-api (typically by starting a Stream) so the resulting error tells
+// us whether the API is installed.
+//
+// With "auto": tryKubetail is called; ErrAPINotInstalled silently falls back
+// to the Kubernetes backend, other errors are surfaced. With "kubetail":
+// tryKubetail is called and any error (including ErrAPINotInstalled) is
+// surfaced loudly so the user knows their explicit request can't be honored.
+func selectBackend(flag string, tryKubetail func() error) (backendChoice, error) {
 	switch flag {
 	case "kubernetes":
 		return backendKubernetes, nil
 	case "kubetail":
-		ok, err := probe(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("--backend=kubetail: probe failed: %w", err)
+		err := tryKubetail()
+		if err == nil {
+			return backendKubetail, nil
 		}
-		if !ok {
-			return 0, fmt.Errorf("--backend=kubetail requested but APIService %q is not Available on this cluster", clusterapi.APIServiceName)
+		if errors.Is(err, clusterapi.ErrAPINotInstalled) {
+			return 0, fmt.Errorf("--backend=kubetail requested but APIService %q is not installed on this cluster: %w", clusterapi.APIServiceName, err)
 		}
-		return backendKubetail, nil
+		return 0, fmt.Errorf("--backend=kubetail: %w", err)
 	case "auto", "":
-		ok, err := probe(ctx)
-		if err != nil || !ok {
+		err := tryKubetail()
+		if err == nil {
+			return backendKubetail, nil
+		}
+		if errors.Is(err, clusterapi.ErrAPINotInstalled) {
 			return backendKubernetes, nil
 		}
-		return backendKubetail, nil
+		return 0, err
 	default:
 		return 0, fmt.Errorf("--backend: invalid value %q (expected auto, kubernetes, or kubetail)", flag)
 	}
+}
+
+// shouldWarnFallback reports whether the user should be told that the CLI
+// silently fell back to the Kubernetes API backend. We only warn when the
+// user asked for "auto" (the default) and ended up on the Kubernetes
+// backend — explicit choices speak for themselves.
+func shouldWarnFallback(flag string, choice backendChoice) bool {
+	return (flag == "auto" || flag == "") && choice == backendKubernetes
 }
 
 var headFlag config.OptionalInt64
@@ -110,12 +174,14 @@ type logsCmdConfig struct {
 	sinceTime time.Time
 	untilTime time.Time
 
-	head    bool
 	headVal int64
-	tail    bool
 	tailVal int64
-	all     bool
 	follow  bool
+
+	// resolvedMode is the logical stream mode after applying --head, --tail,
+	// --all, and --since precedence. It is the single source of truth for
+	// downstream backend wiring.
+	resolvedMode logsStreamMode
 
 	grep       string
 	regionList []string
@@ -342,6 +408,7 @@ func loadLogsCmdConfig(cmd *cobra.Command) (*logsCmdConfig, error) {
 	addColumns, _ := flags.GetStringSlice("add-columns")
 	removeColumns, _ := flags.GetStringSlice("remove-columns")
 	columns = applyColumnAddRemove(columns, addColumns, removeColumns)
+	columns = stripUncoloredDot(columns, useColor(cmd.OutOrStdout()))
 
 	backend, _ := flags.GetString(BackendFlag)
 
@@ -353,17 +420,17 @@ func loadLogsCmdConfig(cmd *cobra.Command) (*logsCmdConfig, error) {
 	}
 
 	// Stream mode
-	streamMode := logsStreamModeUnknown
+	resolvedMode := logsStreamModeUnknown
 	if head {
-		streamMode = logsStreamModeHead
+		resolvedMode = logsStreamModeHead
 	} else if tail {
-		streamMode = logsStreamModeTail
+		resolvedMode = logsStreamModeTail
 	} else if all {
-		streamMode = logsStreamModeAll
+		resolvedMode = logsStreamModeAll
 	} else if since != "" {
-		streamMode = logsStreamModeHead
+		resolvedMode = logsStreamModeHead
 	} else {
-		streamMode = logsStreamModeTail
+		resolvedMode = logsStreamModeTail
 	}
 
 	// Parse `since`
@@ -414,7 +481,7 @@ func loadLogsCmdConfig(cmd *cobra.Command) (*logsCmdConfig, error) {
 		logs.WithAllContainers(allContainers),
 	}
 
-	switch streamMode {
+	switch resolvedMode {
 	case logsStreamModeHead:
 		streamOpts = append(streamOpts, logs.WithHead(headVal))
 	case logsStreamModeTail:
@@ -422,7 +489,7 @@ func loadLogsCmdConfig(cmd *cobra.Command) (*logsCmdConfig, error) {
 	case logsStreamModeAll:
 		streamOpts = append(streamOpts, logs.WithAll())
 	default:
-		return nil, fmt.Errorf("invalid stream mode: %d", streamMode)
+		return nil, fmt.Errorf("invalid stream mode: %d", resolvedMode)
 	}
 
 	cmdCfg := &logsCmdConfig{
@@ -434,12 +501,10 @@ func loadLogsCmdConfig(cmd *cobra.Command) (*logsCmdConfig, error) {
 		sinceTime: sinceTime,
 		untilTime: untilTime,
 
-		head:    head,
-		headVal: headVal,
-		tail:    tail,
-		tailVal: tailVal,
-		all:     all,
-		follow:  follow,
+		headVal:      headVal,
+		tailVal:      tailVal,
+		follow:       follow,
+		resolvedMode: resolvedMode,
 
 		grep:       grep,
 		regionList: regionList,
@@ -510,6 +575,11 @@ func buildClusterAPIStreamConfig(cmdCfg *logsCmdConfig, sources []string) cluste
 		Sources:     sources,
 		Grep:        cmdCfg.grep,
 		Follow:      cmdCfg.follow,
+		Regions:     cmdCfg.regionList,
+		Zones:       cmdCfg.zoneList,
+		OSes:        cmdCfg.osList,
+		Arches:      cmdCfg.archList,
+		Nodes:       cmdCfg.nodeList,
 	}
 	if !cmdCfg.sinceTime.IsZero() {
 		cfg.Since = cmdCfg.sinceTime.Format(time.RFC3339Nano)
@@ -517,17 +587,20 @@ func buildClusterAPIStreamConfig(cmdCfg *logsCmdConfig, sources []string) cluste
 	if !cmdCfg.untilTime.IsZero() {
 		cfg.Until = cmdCfg.untilTime.Format(time.RFC3339Nano)
 	}
-	switch {
-	case cmdCfg.head:
+	switch cmdCfg.resolvedMode {
+	case logsStreamModeHead:
 		cfg.Mode = "HEAD"
 		cfg.Limit = int(cmdCfg.headVal)
-	case cmdCfg.all:
+	case logsStreamModeAll:
 		// Express "all" as HEAD pagination with no limit cap; the server
-		// will apply its own batch size and we'll iterate via NextCursor.
+		// applies its own batch size and Stream walks NextCursor.
 		cfg.Mode = "HEAD"
-	case cmdCfg.tailVal == 0:
-		// `--tail=0` means no backlog; empty Mode skips bootstrap fetch.
-	default:
+		cfg.Paginate = true
+	case logsStreamModeTail:
+		if cmdCfg.tailVal == 0 {
+			// `--tail=0` means no backlog; empty Mode skips bootstrap fetch.
+			break
+		}
 		cfg.Mode = "TAIL"
 		cfg.Limit = int(cmdCfg.tailVal)
 	}
@@ -536,7 +609,9 @@ func buildClusterAPIStreamConfig(cmdCfg *logsCmdConfig, sources []string) cluste
 
 func printLogs(rootCtx context.Context, cmd *cobra.Command, cmdCfg *logsCmdConfig, stream logs.Stream) {
 	// Write records to stdout
-	writer := bufio.NewWriter(cmd.OutOrStdout())
+	stdout := cmd.OutOrStdout()
+	color := useColor(stdout)
+	writer := bufio.NewWriter(stdout)
 
 	headers, colWidths := getTableWriterHeaders(cmdCfg, stream.Sources())
 	tw := tablewriter.NewTableWriter(writer, colWidths)
@@ -564,7 +639,7 @@ func printLogs(rootCtx context.Context, cmd *cobra.Command, cmdCfg *logsCmdConfi
 			case "timestamp":
 				row = append(row, record.Timestamp.Format(time.RFC3339Nano))
 			case "dot":
-				row = append(row, getDotIndicator(record.Source.ContainerID))
+				row = append(row, getDotIndicator(record.Source.ContainerID, color))
 			case "node":
 				row = append(row, record.Source.Metadata.Node)
 			case "region":
@@ -604,12 +679,10 @@ func printLogs(rootCtx context.Context, cmd *cobra.Command, cmdCfg *logsCmdConfi
 	}
 
 	// Output paging cursors if requested
-	if cmdCfg.withCursors && !cmdCfg.follow && !cmdCfg.all {
-		if cmdCfg.head && lastRecord != nil {
-			// For head mode, the last record's timestamp is used as the "after" cursor for the next page
+	if cmdCfg.withCursors && !cmdCfg.follow && cmdCfg.resolvedMode != logsStreamModeAll {
+		if cmdCfg.resolvedMode == logsStreamModeHead && lastRecord != nil {
 			fmt.Fprintf(cmd.OutOrStderr(), "\n--- Next page: --after %s ---\n", lastRecord.Timestamp.Format(time.RFC3339Nano))
 		} else if firstRecord != nil {
-			// For tail mode, the first record's timestamp would be used as the "before" cursor
 			fmt.Fprintf(cmd.OutOrStderr(), "\n--- Prev page: --before %s ---\n", firstRecord.Timestamp.Format(time.RFC3339Nano))
 		}
 	}
@@ -649,30 +722,51 @@ var logsCmd = &cobra.Command{
 		cm, err := k8shelpers.NewConnectionManager(env, k8shelpers.WithKubeconfigPath(cmdCfg.kubeconfigPath), k8shelpers.WithLazyConnect(true))
 		cli.ExitOnError(err)
 
-		var restCfg *rest.Config
-		probe := func(ctx context.Context) (bool, error) {
-			c, err := cm.GetOrCreateRestConfig(cmdCfg.kubecontext)
+		// tryKubetail attempts to start a Kubetail-API-backed stream by
+		// first probing the cluster-api endpoint with a short timeout, then
+		// (on success) starting the stream against rootCtx. The probe is
+		// bounded so a blackholed aggregated APIService (stale Endpoints,
+		// dropped SYNs, hung TLS handshake) can't stall backend
+		// auto-selection — without this cap, kubetail logs could block
+		// indefinitely before falling back.
+		var kubetailStream *clusterapi.Stream
+		tryKubetail := func() error {
+			restCfg, err := cm.GetOrCreateRestConfig(cmdCfg.kubecontext)
 			if err != nil {
-				return false, err
+				return err
 			}
-			restCfg = c
-			return clusterapi.IsKubetailAPIAvailable(ctx, restCfg)
+			client, err := clusterapi.NewClient(restCfg)
+			if err != nil {
+				return err
+			}
+			probeCtx, cancel := context.WithTimeout(rootCtx, 2*time.Second)
+			defer cancel()
+			if err := client.Ping(probeCtx); err != nil {
+				return err
+			}
+			s := clusterapi.NewStream(client, buildClusterAPIStreamConfig(cmdCfg, args))
+			if err := s.Start(rootCtx); err != nil {
+				return err
+			}
+			kubetailStream = s
+			return nil
 		}
-		choice, err := selectBackend(rootCtx, cmdCfg.backend, probe)
+
+		choice, err := selectBackend(cmdCfg.backend, tryKubetail)
 		cli.ExitOnError(err)
 
 		var stream logs.Stream
 		switch choice {
 		case backendKubetail:
-			client, err := clusterapi.NewClient(restCfg)
-			cli.ExitOnError(err)
-			s := clusterapi.NewStream(client, buildClusterAPIStreamConfig(cmdCfg, args))
-			cli.ExitOnError(s.Start(rootCtx))
-			defer s.Close()
-			stream = s
+			defer kubetailStream.Close()
+			stream = kubetailStream
 		default:
+			stderr := cmd.OutOrStderr()
+			if shouldWarnFallback(cmdCfg.backend, choice) {
+				fmt.Fprint(stderr, colorizeWarning(stderr, kubetailFallbackWarning))
+			}
 			if cmdCfg.grep != "" {
-				fmt.Fprint(cmd.OutOrStderr(), grepKubernetesBackendWarning)
+				fmt.Fprint(stderr, colorizeWarning(stderr, grepKubernetesBackendWarning))
 			}
 			s, err := logs.NewStream(rootCtx, cm, args, cmdCfg.streamOpts...)
 			cli.ExitOnError(err)
@@ -689,8 +783,14 @@ var logsCmd = &cobra.Command{
 	},
 }
 
-// Return ANSI color coded dot indicator based on container ID
-func getDotIndicator(containerID string) string {
+// Return ANSI color coded dot indicator based on container ID. When color
+// is false (e.g. stdout is not a TTY) the bullet is returned uncolored so
+// redirected output / CI logs don't get raw escape sequences.
+func getDotIndicator(containerID string, color bool) string {
+	const bullet = "●"
+	if !color {
+		return bullet
+	}
 	colors := []string{
 		"31m", // red
 		"32m", // green
@@ -721,9 +821,7 @@ func getDotIndicator(containerID string) string {
 		idx = -idx
 	}
 
-	dot := fmt.Sprintf("\033[%s%s\033[0m", colors[idx], "\u25CF")
-
-	return dot
+	return fmt.Sprintf("\033[%s%s\033[0m", colors[idx], bullet)
 }
 
 // Return table writer headers and col widths

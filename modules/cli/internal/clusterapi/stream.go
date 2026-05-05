@@ -36,6 +36,17 @@ type StreamConfig struct {
 	Grep        string
 	Limit       int
 	Follow      bool
+
+	// Paginate, when true and Mode is HEAD, makes the bootstrap loop walk
+	// every page of NextCursor until the server stops returning one.
+	Paginate bool
+
+	// Source filters mapped 1:1 to the cluster-api LogSourceFilter input.
+	Regions []string
+	Zones   []string
+	OSes    []string
+	Arches  []string
+	Nodes   []string
 }
 
 // Stream consumes the cluster-api GraphQL endpoint and exposes a logs.Stream
@@ -66,11 +77,50 @@ func newStreamForTest(client clientIface, cfg StreamConfig) *Stream {
 	}
 }
 
+// Start performs the bootstrap LogRecordsFetch synchronously (when Mode is
+// set) so callers see connectivity errors before any records reach the
+// consumer, then kicks off a goroutine that emits the seeded response and
+// continues with pagination and/or the follow subscription. Follow-only
+// flows (Mode == "") issue no synchronous round-trip — callers that need to
+// probe API availability must do so before calling Start (see clusterapi
+// Client.Ping); doing it here would either duplicate the caller's probe or
+// re-introduce an unbounded round-trip on rootCtx.
 func (s *Stream) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
-	go s.run(ctx)
+
+	var first *LogRecordsQueryResponse
+	if s.cfg.Mode != "" {
+		resp, err := s.client.LogRecordsFetch(ctx, s.fetchVars(""))
+		if err != nil {
+			cancel()
+			close(s.out)
+			close(s.doneCh)
+			return err
+		}
+		first = resp
+	}
+
+	go s.run(ctx, first)
 	return nil
+}
+
+func (s *Stream) fetchVars(cursor string) LogRecordsFetchVars {
+	return LogRecordsFetchVars{
+		KubeContext: s.cfg.KubeContext,
+		Sources:     s.cfg.Sources,
+		Mode:        s.cfg.Mode,
+		Since:       s.cfg.Since,
+		Until:       s.cfg.Until,
+		Grep:        s.cfg.Grep,
+		Limit:       s.cfg.Limit,
+		Cursor:      cursor,
+		Regions:     s.cfg.Regions,
+		Zones:       s.cfg.Zones,
+		OSes:        s.cfg.OSes,
+		Arches:      s.cfg.Arches,
+		Nodes:       s.cfg.Nodes,
+	}
 }
 
 // Sources returns nil; the Kubetail API streams already-merged records and
@@ -100,30 +150,17 @@ func (s *Stream) setErr(err error) {
 	}
 }
 
-func (s *Stream) run(ctx context.Context) {
+func (s *Stream) run(ctx context.Context, first *LogRecordsQueryResponse) {
 	defer close(s.out)
 	defer close(s.doneCh)
 
 	// Bootstrap fetch: HEAD paginates via NextCursor; TAIL is a single page.
 	// An empty Mode skips the bootstrap entirely (used by `-f` with no
-	// explicit --tail, where the user wants only new records).
-	cursor := ""
+	// explicit --tail, where the user wants only new records). The first
+	// response was fetched synchronously by Start.
 	var lastTimestamp string
-	for s.cfg.Mode != "" {
-		resp, err := s.client.LogRecordsFetch(ctx, LogRecordsFetchVars{
-			KubeContext: s.cfg.KubeContext,
-			Sources:     s.cfg.Sources,
-			Mode:        s.cfg.Mode,
-			Since:       s.cfg.Since,
-			Until:       s.cfg.Until,
-			Grep:        s.cfg.Grep,
-			Limit:       s.cfg.Limit,
-			Cursor:      cursor,
-		})
-		if err != nil {
-			s.setErr(err)
-			return
-		}
+	resp := first
+	for resp != nil {
 		for _, r := range resp.Records {
 			select {
 			case s.out <- r:
@@ -132,10 +169,15 @@ func (s *Stream) run(ctx context.Context) {
 			}
 			lastTimestamp = r.Timestamp.Format(time.RFC3339Nano)
 		}
-		if s.cfg.Mode != "HEAD" || resp.NextCursor == nil || *resp.NextCursor == "" {
+		if !s.cfg.Paginate || resp.NextCursor == nil || *resp.NextCursor == "" {
 			break
 		}
-		cursor = *resp.NextCursor
+		next, err := s.client.LogRecordsFetch(ctx, s.fetchVars(*resp.NextCursor))
+		if err != nil {
+			s.setErr(err)
+			return
+		}
+		resp = next
 	}
 
 	if !s.cfg.Follow {
@@ -156,6 +198,11 @@ func (s *Stream) run(ctx context.Context) {
 		Since:       s.cfg.Since,
 		After:       followAfter,
 		Grep:        s.cfg.Grep,
+		Regions:     s.cfg.Regions,
+		Zones:       s.cfg.Zones,
+		OSes:        s.cfg.OSes,
+		Arches:      s.cfg.Arches,
+		Nodes:       s.cfg.Nodes,
 	})
 	for records != nil || errs != nil {
 		select {
